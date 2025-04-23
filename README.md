@@ -12,7 +12,7 @@ Before you start, make sure you have the `snowman` package installed. You can in
 
 ```r
 # Install the snowman package from GitHub
-devtools::install_github("PekkaNiittynen/snowman")
+devtools::install_github("poniitty/snowman")
 ```
 
 ## Load required libraries
