@@ -415,8 +415,7 @@ calc_predictors <- function(image_df, site_name, base_landsat_dir, data_source =
 }
 
 
-#' Internal Function to Create a Base URL with Microsoft Planetary Computer
-#' @keywords internal
+# Internal Function to Create a Base URL with Microsoft Planetary Computer
 make_vsicurl_url_dem <- function(base_url) {
   paste0(
     "/vsicurl", 
@@ -427,8 +426,7 @@ make_vsicurl_url_dem <- function(base_url) {
   )
 }
 
-#' Internal Function to Create a Base URL with Microsoft Planetary Computer
-#' @keywords internal
+# Internal Function to Create a Base URL with Microsoft Planetary Computer
 make_vsicurl_url_esa <- function(base_url) {
   paste0(
     "/vsicurl", 
@@ -439,8 +437,7 @@ make_vsicurl_url_esa <- function(base_url) {
   )
 }
 
-#' Internal Functions to extract pixel information from the Landsat Quality Assesment (QA) layer
-#' @keywords internal
+# Internal Functions to extract pixel information from the Landsat Quality Assesment (QA) layer
 mask_fill <- function(x) {as.numeric(intToBits(x)[1])}
 mask_dilcloud <- function(x) {as.numeric(intToBits(x)[2])}
 mask_cloud <- function(x) {as.numeric(intToBits(x)[4])}
