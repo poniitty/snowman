@@ -55,6 +55,7 @@ the relevant Landsat scenes.
 }
 \examples{
 \dontrun{
+# The full workflow
 library(snowman)
 library(terra)
 

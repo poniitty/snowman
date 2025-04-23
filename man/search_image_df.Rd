@@ -22,6 +22,52 @@ This function extracts metadata from previously downloaded Landsat imagery.
 }
 \examples{
 \dontrun{
-search_image_df(site_name = "ExampleSite")
+# The full workflow
+library(snowman)
+library(terra)
+
+# Set the number of cores
+n_workers <- 4
+
+# Replace with your own path where all data will be downloaded
+base_landsat_path <- "C:/MyTemp/RS/"
+
+site <- "Sierra_nevada" # Name of the AOI
+aoi_point <- list(lon = -3.311665, lat = 37.053188) # center point of AOI
+
+# Download Landsat-8 imagery
+image_df <- extract_landsat(aoi = aoi_point,
+                            site_name = site,
+                            base_landsat_dir = base_landsat_path,
+                            sats = "LC08",
+                            workers = n_workers)
+
+# Calculate other geospatial information for the classifier
+calc_predictors(image_df, site_name = site, base_landsat_dir = base_landsat_path)
+
+# Download pretrained Random forest classifier
+download_model(model_names = "LC08",
+               model_dir = base_landsat_path)
+
+# Run the classification across imagery
+lss <- classify_landsat(image_df, 
+                        site_name = site, 
+                        base_landsat_dir = base_landsat_path, 
+                        model_dir = base_landsat_path, 
+                        workers = n_workers)
+
+# Calculate snow variables over the AOI based on the classified imagery
+snow_vars <- calc_snow_variables(image_df, 
+                                 site_name = site, 
+                                 base_landsat_dir = base_landsat_path, 
+                                 workers = n_workers)
+
+# Plot one of the resulting layers
+plot(snow_vars$scd, col = rev(topo.colors(100)), 
+     main = "Snow cover duration in Sierra Nevada")
+
+# Save the resulting snow maps as GeoTiffs
+writeRaster(snow_vars, paste0(base_landsat_path, "/", site, "/", "snow_variables.tif"), 
+            datatype = "FLT4S")
 }
 }

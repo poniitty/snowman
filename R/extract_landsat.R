@@ -20,6 +20,7 @@
 #' @return A tibble containing the metadata of the downloaded Landsat scenes.
 #' @examples
 #' \dontrun{
+#' # The full workflow
 #' library(snowman)
 #' library(terra)
 #' 
