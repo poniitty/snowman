@@ -10,7 +10,9 @@
 #' @param data_source A character string representing the data source (default is "rstac").
 #' @return Raster files written to disk.
 #' @examples
+#' \dontrun{
 #' calc_predictors(image_df, site_name = "ExampleSite", base_landsat_dir = "path/to/landsat")
+#' }
 #' @export
 #' @import rstac dplyr sf terra lubridate stringr parallel tibble readr
 calc_predictors <- function(image_df, site_name, base_landsat_dir, data_source = "rstac") {

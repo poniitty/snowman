@@ -23,5 +23,7 @@ This function calculates snow variables from classified Landsat imagery. It proc
 calculates snow proportions, and generates snow melting day (SCD) and trend rasters.
 }
 \examples{
+\dontrun{
 calc_snow_variables(image_df, site_name = "ExampleSite", base_landsat_dir = "path/to/landsat")
+}
 }

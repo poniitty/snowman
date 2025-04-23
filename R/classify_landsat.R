@@ -11,7 +11,10 @@
 #' @param force Logical, if TRUE classification will be run also for images with previously classified.
 #' @return A list of file paths to the classified rasters.
 #' @examples
-#' classify_landsat(image_df, site_name = "ExampleSite", base_landsat_dir = "path/to/landsat", model_dir = "path/to/models")
+#' \dontrun{
+#' classify_landsat(image_df, site_name = "ExampleSite", 
+#' base_landsat_dir = "path/to/landsat", model_dir = "path/to/models")
+#' }
 #' @export
 #' @import rstac dplyr sf terra lubridate stringr parallel tibble solartime randomForestSRC
 classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir, workers, force = FALSE) {

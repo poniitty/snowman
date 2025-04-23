@@ -22,5 +22,7 @@ A tibble containing the metadata of the previously downloaded Landsat scenes.
 This function extracts metadata from previously downloaded Landsat imagery.
 }
 \examples{
+\dontrun{
 search_image_df(site_name = "ExampleSite")
+}
 }

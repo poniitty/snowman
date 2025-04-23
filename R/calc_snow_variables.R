@@ -9,7 +9,9 @@
 #' @param workers A numeric value representing the number of workers for parallel processing.
 #' @return A SpatRaster object containing the snow variables.
 #' @examples
+#' \dontrun{
 #' calc_snow_variables(image_df, site_name = "ExampleSite", base_landsat_dir = "path/to/landsat")
+#' }
 #' @export
 #' @import dplyr sf terra lubridate stringr parallel tibble mgcv purrr tidyr zoo
 calc_snow_variables <- function(image_df, site_name, base_landsat_dir, workers) {

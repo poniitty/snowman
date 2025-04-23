@@ -24,5 +24,7 @@ It processes the input image data frame, downloads necessary data, and computes 
 predictors such as DEM variables, median Landsat images, and median indices.
 }
 \examples{
+\dontrun{
 calc_predictors(image_df, site_name = "ExampleSite", base_landsat_dir = "path/to/landsat")
+}
 }

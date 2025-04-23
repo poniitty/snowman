@@ -34,5 +34,8 @@ This function classifies Landsat imagery using pretrained models. It processes t
 applies the models, and generates classification rasters.
 }
 \examples{
-classify_landsat(image_df, site_name = "ExampleSite", base_landsat_dir = "path/to/landsat", model_dir = "path/to/models")
+\dontrun{
+classify_landsat(image_df, site_name = "ExampleSite", 
+base_landsat_dir = "path/to/landsat", model_dir = "path/to/models")
+}
 }

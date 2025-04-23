@@ -55,5 +55,7 @@ It processes the area of interest (AOI), transforms coordinates, and downloads
 the relevant Landsat scenes.
 }
 \examples{
+\dontrun{
 extract_landsat(aoi, site_name = "ExampleSite")
+}
 }

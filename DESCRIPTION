@@ -31,3 +31,5 @@ Imports:
     zoo
 Suggests:
     testthat
+Depends: 
+    R (>= 3.5)

@@ -8,7 +8,9 @@
 #' @param data_source A character string representing the data source (default is "rstac").
 #' @return A tibble containing the metadata of the previously downloaded Landsat scenes.
 #' @examples
+#' \dontrun{
 #' search_image_df(site_name = "ExampleSite")
+#' }
 #' @export
 #' @import dplyr sf terra lubridate stringr parallel tibble readr
 search_image_df <- function(site_name, base_landsat_dir, workers = 1){

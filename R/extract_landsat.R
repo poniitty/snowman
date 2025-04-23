@@ -18,7 +18,9 @@
 #' @param force Logical, if TRUE deletes all previously downloaded imagery.
 #' @return A tibble containing the metadata of the downloaded Landsat scenes.
 #' @examples
+#' \dontrun{
 #' extract_landsat(aoi, site_name = "ExampleSite")
+#' }
 #' @export
 #' @import rstac dplyr sf terra lubridate stringr parallel tibble readr
 extract_landsat <- function(aoi,

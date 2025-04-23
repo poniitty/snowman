@@ -24,5 +24,7 @@ download_model(
 This function downloads the pretrained model from a GitHub repository.
 }
 \examples{
+\dontrun{
 download_model(model_name = "landsat_latest", model_dir = "path/to/your/model")
+}
 }

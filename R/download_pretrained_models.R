@@ -7,7 +7,9 @@
 #' @param timeout Maximum time to use to download the files (á ~80MB). Defaults to 300 seconds. Increase if very slow network.
 #' @param force Logical. If FALSE (default) downloads the model object only if no previous model file exists.
 #' @examples
+#' \dontrun{
 #' download_model(model_name = "landsat_latest", model_dir = "path/to/your/model")
+#' }
 #' @export
 download_model <- function(model_names = c("TM04","TM05","LE07","LC08","LC09"), model_dir, timeout = 300, force = FALSE) {
   # URL of the GitHub repository
