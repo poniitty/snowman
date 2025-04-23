@@ -86,8 +86,7 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir, w
   return(unlist(lss))
 }
 
-#' Internal Function to Classify a Single Landsat Image
-#' @keywords internal
+# Internal Function to Classify a Single Landsat Image
 classifying_function <- function(imageid, image_df, predictor_dir, class_landsat_dir,
                                  base_landsat_dir, site_name, force = FALSE,
                                  mod8, mod7, mod5, slope, esalc, esaw, dem) {
@@ -393,8 +392,7 @@ classifying_function <- function(imageid, image_df, predictor_dir, class_landsat
 }
 
 
-#' Internal helper function to calculate a mode
-#' @keywords internal
+# Internal helper function to calculate a mode
 getmode <- function(v) {
   uniqv <- unique(v)
   uniqv[which.max(tabulate(match(v, uniqv)))]

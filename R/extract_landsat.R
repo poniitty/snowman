@@ -281,8 +281,7 @@ extract_landsat <- function(aoi,
   }
 }
 
-#' Internal Function to Create a Base URL with Microsoft Planetary Computer
-#' @keywords internal
+# Internal Function to Create a Base URL with Microsoft Planetary Computer
 make_vsicurl_url <- function(base_url) {
   paste0(
     "/vsicurl",
@@ -293,8 +292,7 @@ make_vsicurl_url <- function(base_url) {
   )
 }
 
-#' Internal Function to Extract Landsat Imagery from STAC
-#' @keywords internal
+# Internal Function to Extract Landsat Imagery from STAC
 extract_landsat_stac <- function(aoi,
                                  epsg,
                                  excl_dates,
@@ -427,8 +425,7 @@ extract_landsat_stac <- function(aoi,
   return(idsALL)
 }
 
-#' Internal Function to Extract Landsat Imagery from STAC
-#' @keywords internal
+# Internal Function to Extract Landsat Imagery from STAC
 process_feature <- function(ft, area_landsat_dir, aoi, tempdir) {
   # ft <- it_obj$features[[1]]
   
@@ -491,8 +488,7 @@ process_feature <- function(ft, area_landsat_dir, aoi, tempdir) {
   }
 }
 
-#' Internal Function to Extract Landsat Imagery from STAC
-#' @keywords internal
+# Internal Function to Extract Landsat Imagery from STAC
 process_features_in_parallel <- function(it_obj, area_landsat_dir, aoi, workers) {
   # Check the operating system
   os <- Sys.info()["sysname"]
@@ -520,8 +516,7 @@ process_features_in_parallel <- function(it_obj, area_landsat_dir, aoi, workers)
   return(juuh)
 }
 
-#' Internal Function to check if raster files work properly
-#' @keywords internal
+# Internal Function to check if raster files work properly
 check_raster <- function(image, image_dir){
   
   xx <- try(terra::rast(paste0(image_dir,"/",image)))
@@ -540,8 +535,7 @@ check_raster <- function(image, image_dir){
   }
 }
 
-#' Internal Function to calculate cloud cover within the rasters
-#' @keywords internal
+# Internal Function to calculate cloud cover within the rasters
 calc_coverages <- function(image, image_dir){
   # image <- lss$file[[5]]
   require(terra)

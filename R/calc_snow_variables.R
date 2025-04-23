@@ -193,8 +193,7 @@ calc_snow_variables <- function(image_df, site_name, base_landsat_dir, workers =
   return(rs)
 }
 
-#' Internal Function to Read Classifications
-#' @keywords internal
+# Internal Function to Read Classifications
 read_classifications <- function(imagedf, basedir) {
   rs <- lapply(imagedf$file, function(x) {
     r <- rast(paste0(basedir, "/", x))
@@ -219,8 +218,7 @@ read_classifications <- function(imagedf, basedir) {
   return(rs)
 }
 
-#' Internal Function to Calculate Snow Melting Day and Trend
-#' @keywords internal
+# Internal Function to Calculate Snow Melting Day and Trend
 cal_scd <- function(d_all, extradf) {
   # d_all <- mm %>% mutate(cell2 = cell) %>% nest(data = -cell2) %>% slice(1) %>% pull(data)
   # d_all <- d_all[[1]]
@@ -306,8 +304,7 @@ cal_scd <- function(d_all, extradf) {
   return(results)
 }
 
-#' Internal Function to Prepare No-Snow Values
-#' @keywords internal
+# Internal Function to Prepare No-Snow Values
 nosnow_values <- function(x) {
   r <- x
   x[["nosnow"]][!is.na(x[["nosnow"]])] <- 0
