@@ -1,0 +1,33 @@
+Package: snowman
+Type: Package
+Title: Calculate Snow Cover Duration Across Landscapes Based on Satellite Imagery
+Version: 0.1.0
+Authors@R: 
+    person("Pekka", "Niittynen", , "poniitty@gmail.com", role = c("aut", "cre"),
+           comment = c(ORCID = "0000-0002-7290-029X"))
+Maintainer: Pekka Niittynen <poniitty@gmail.com>
+Description: This R package calculates snow cover duration across landscapes based on open satellite imagery at fine spatial resolutions.
+License: GNU General Public License
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+LazyData: true
+RoxygenNote: 7.3.2
+Imports:
+    dplyr,
+    sf,
+    lubridate,
+    stringr,
+    parallel,
+    randomForestSRC,
+    rstac,
+    solartime,
+    httr,
+    terra,
+    tibble,
+    readr,
+    mgcv,
+    purrr,
+    tidyr,
+    zoo
+Suggests:
+    testthat
