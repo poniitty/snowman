@@ -416,12 +416,6 @@ calc_predictors <- function(image_df, site_name, base_landsat_dir, data_source =
 
 
 #' Internal Function to Create a Base URL with Microsoft Planetary Computer
-#'
-#' This function creates a base URL for extracting targeted ALOS DEMs from the Microsoft Planetary Computer.
-#' It is used internally by other functions.
-#'
-#' @param base_url A character string representing the STAC URL for the image.
-#' @return A character string representing the base URL to extract the targeted DEM file.
 #' @keywords internal
 make_vsicurl_url_dem <- function(base_url) {
   paste0(
@@ -432,13 +426,8 @@ make_vsicurl_url_dem <- function(base_url) {
     base_url
   )
 }
+
 #' Internal Function to Create a Base URL with Microsoft Planetary Computer
-#'
-#' This function creates a base URL for extracting targeted ESA WorldCover data from the Microsoft Planetary Computer.
-#' It is used internally by other functions.
-#'
-#' @param base_url A character string representing the STAC URL for the image.
-#' @return A character string representing the base URL to extract the targeted DEM file.
 #' @keywords internal
 make_vsicurl_url_esa <- function(base_url) {
   paste0(
@@ -451,7 +440,6 @@ make_vsicurl_url_esa <- function(base_url) {
 }
 
 #' Internal Functions to extract pixel information from the Landsat Quality Assesment (QA) layer
-#'
 #' @keywords internal
 mask_fill <- function(x) {as.numeric(intToBits(x)[1])}
 mask_dilcloud <- function(x) {as.numeric(intToBits(x)[2])}

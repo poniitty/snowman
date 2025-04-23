@@ -87,24 +87,6 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir, w
 }
 
 #' Internal Function to Classify a Single Landsat Image
-#'
-#' This function classifies a single Landsat image using pretrained models and various predictors.
-#'
-#' @param imageid A character string representing the file name of the Landsat image.
-#' @param image_df A tibble containing the metadata of the Landsat images.
-#' @param predictor_dir A character string representing the directory containing the predictor rasters.
-#' @param class_landsat_dir A character string representing the directory to save the classified rasters.
-#' @param base_landsat_dir A character string representing the base directory for Landsat imagery.
-#' @param site_name A character string representing the name of the site.
-#' @param force Logical, if TRUE classification will be run also for images with previously classified.
-#' @param mod8 A pretrained model for Landsat-8 imagery.
-#' @param mod7 A pretrained model for Landsat-7 imagery.
-#' @param mod5 A pretrained model for Landsat-5 imagery.
-#' @param slope A raster object representing the slope.
-#' @param esalc A raster object representing the ESRI Land Cover.
-#' @param esaw A raster object representing the ESRI Water.
-#' @param dem A raster object representing the Digital Elevation Model.
-#' @return The file name of the classified raster.
 #' @keywords internal
 classifying_function <- function(imageid, image_df, predictor_dir, class_landsat_dir,
                                  base_landsat_dir, site_name, force = FALSE,
@@ -412,7 +394,6 @@ classifying_function <- function(imageid, image_df, predictor_dir, class_landsat
 
 
 #' Internal helper function to calculate a mode
-#'
 #' @keywords internal
 getmode <- function(v) {
   uniqv <- unique(v)

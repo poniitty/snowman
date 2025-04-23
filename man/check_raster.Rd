@@ -6,14 +6,6 @@
 \usage{
 check_raster(image, image_dir)
 }
-\arguments{
-\item{image}{A character string representing the file name.}
-
-\item{image_dir}{A character string representing directory for the files.}
-}
-\value{
-A character vector representing the raster files that did not work.
-}
 \description{
 Internal Function to check if raster files work properly
 }

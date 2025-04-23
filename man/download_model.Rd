@@ -12,19 +12,19 @@ download_model(
 )
 }
 \arguments{
+\item{model_names}{Character vector specifying for which satellites you want to download the models. Any of "TM04","TM05","LE07","LC08","LC09" or "ALL"}
+
 \item{model_dir}{Character, path to folder where the model objects will be stored.}
 
 \item{timeout}{Maximum time to use to download the files (á ~80MB). Defaults to 300 seconds. Increase if very slow network.}
 
 \item{force}{Logical. If FALSE (default) downloads the model object only if no previous model file exists.}
-
-\item{model_name}{Character vector specifying for which satellites you want to download the models. Any of "TM04","TM05","LE07","LC08","LC09" or "ALL"}
 }
 \description{
 This function downloads the pretrained model from a GitHub repository.
 }
 \examples{
 \dontrun{
-download_model(model_name = "landsat_latest", model_dir = "path/to/your/model")
+download_model(model_names = "landsat_latest", model_dir = "path/to/your/model")
 }
 }

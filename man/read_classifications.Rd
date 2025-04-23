@@ -6,15 +6,7 @@
 \usage{
 read_classifications(imagedf, basedir)
 }
-\arguments{
-\item{imagedf}{A tibble containing the metadata of the classified images.}
-
-\item{basedir}{A character string representing the base directory for the classified images.}
-}
-\value{
-A list of SpatRaster objects.
-}
 \description{
-This function reads classified rasters and prepares them for further processing.
+Internal Function to Read Classifications
 }
 \keyword{internal}

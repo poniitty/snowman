@@ -6,14 +6,7 @@
 \usage{
 make_vsicurl_url_esa(base_url)
 }
-\arguments{
-\item{base_url}{A character string representing the STAC URL for the image.}
-}
-\value{
-A character string representing the base URL to extract the targeted DEM file.
-}
 \description{
-This function creates a base URL for extracting targeted ESA WorldCover data from the Microsoft Planetary Computer.
-It is used internally by other functions.
+Internal Function to Create a Base URL with Microsoft Planetary Computer
 }
 \keyword{internal}

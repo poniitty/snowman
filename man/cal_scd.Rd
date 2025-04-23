@@ -6,15 +6,7 @@
 \usage{
 cal_scd(d_all, extradf)
 }
-\arguments{
-\item{d_all}{A data frame containing snow and no-snow values for a given cell.}
-
-\item{extradf}{An optional data frame containing extra days for prediction.}
-}
-\value{
-A data frame containing the calculated snow variables.
-}
 \description{
-This function calculates the snow melting day (SCD) and trend for a given cell.
+Internal Function to Calculate Snow Melting Day and Trend
 }
 \keyword{internal}

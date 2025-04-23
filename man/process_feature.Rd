@@ -6,18 +6,6 @@
 \usage{
 process_feature(ft, area_landsat_dir, aoi, tempdir)
 }
-\arguments{
-\item{ft}{A STAC feature queried from MPC.}
-
-\item{area_landsat_dir}{A character string representing the directory where Landsat imagery will be saved.}
-
-\item{aoi}{An \code{sf} object representing the area of interest.}
-
-\item{tempdir}{A character string representing the temporary directory where Landsat imagery will be saved.}
-}
-\value{
-FALSE or TRUE depending on the success of the downloading.
-}
 \description{
 Internal Function to Extract Landsat Imagery from STAC
 }

@@ -6,13 +6,7 @@
 \usage{
 nosnow_values(x)
 }
-\arguments{
-\item{x}{A SpatRaster object.}
-}
-\value{
-A data frame containing no-snow and snow values.
-}
 \description{
-This function prepares no-snow values for further processing.
+Internal Function to Prepare No-Snow Values
 }
 \keyword{internal}

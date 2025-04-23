@@ -11,9 +11,8 @@ search_image_df(site_name, base_landsat_dir, workers = 1)
 
 \item{base_landsat_dir}{A character string representing the base directory for Landsat imagery.}
 
-\item{workers}{A numeric value representing the number of workers for parallel processing.}
-
-\item{data_source}{A character string representing the data source (default is "rstac").}
+\item{workers}{A numeric value representing the number of workers for parallel processing.
+Setting workers > 1 (default) enables parallel computing across multiple nodes.}
 }
 \value{
 A tibble containing the metadata of the previously downloaded Landsat scenes.

@@ -6,18 +6,6 @@
 \usage{
 process_features_in_parallel(it_obj, area_landsat_dir, aoi, workers)
 }
-\arguments{
-\item{it_obj}{A collection of STAC features queried from MPC.}
-
-\item{area_landsat_dir}{A character string representing the directory where Landsat imagery will be saved.}
-
-\item{aoi}{An \code{sf} object representing the area of interest.}
-
-\item{workers}{A numeric value representing the number of workers for parallel processing.}
-}
-\value{
-A list of logical FALSE or TRUE depending on the success of the downloads.
-}
 \description{
 Internal Function to Extract Landsat Imagery from STAC
 }

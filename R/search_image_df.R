@@ -4,8 +4,8 @@
 #'
 #' @param site_name A character string representing the name of the site.
 #' @param base_landsat_dir A character string representing the base directory for Landsat imagery.
-#' @param workers A numeric value representing the number of workers for parallel processing.
-#' @param data_source A character string representing the data source (default is "rstac").
+#' @param workers A numeric value representing the number of workers for parallel processing. 
+#' Setting workers > 1 (default) enables parallel computing across multiple nodes.
 #' @return A tibble containing the metadata of the previously downloaded Landsat scenes.
 #' @examples
 #' \dontrun{

@@ -6,15 +6,16 @@
 #'
 #' @param aoi An `sf` object or a list containing the area of interest.
 #' @param site_name A character string representing the name of the site.
-#' @param aoi_size A numeric value representing the size of the AOI in kilometers (default is 5).
-#' @param start_date A character string representing the start date for the imagery (default is "2013-01-01").
-#' @param end_date A character string representing the end date for the imagery (default is the current date).
-#' @param months A numeric vector representing the months to include (default is 1:12).
-#' @param sats A character string representing the satellite to use (default is "LC08").
+#' @param aoi_size A numeric value representing the size of the AOI in kilometers.
+#' @param start_date A character string representing the start date for the imagery.
+#' @param end_date A character string representing the end date for the imagery.
+#' @param months A numeric vector representing the months to include (default is all months, so 1:12).
+#' @param sats A character string representing the satellite to use (default is Landsat-8 only, so "LC08").
 #' @param minclouds A numeric value representing the minimum cloud cover percentage (default is 50).
 #' @param base_landsat_dir A character string representing the base directory for Landsat imagery.
-#' @param workers A numeric value representing the number of workers for parallel processing.
-#' @param data_source A character string representing the data source (default is "rstac").
+#' @param workers A numeric value representing the number of workers for parallel processing. 
+#' Setting workers > 1 (default) enables parallel computing across multiple nodes.
+#' @param data_source A character string representing the data source (currently only option is "rstac").
 #' @param force Logical, if TRUE deletes all previously downloaded imagery.
 #' @return A tibble containing the metadata of the downloaded Landsat scenes.
 #' @examples
@@ -25,16 +26,14 @@
 #' @import rstac dplyr sf terra lubridate stringr parallel tibble readr
 extract_landsat <- function(aoi,
                             site_name,
-                            aoi_size = 5,
-                            start_date = "2013-01-01",
-                            end_date = Sys.Date(),
+                            aoi_size = 2,
+                            start_date = "2020-01-01",
+                            end_date = "2024-12-01",
                             months = 1:12,
                             sats = "LC08",
                             minclouds = 50,
-                            my_timeout = 400,
-                            info_timeout = 60,
                             base_landsat_dir,
-                            workers,
+                            workers = 1,
                             data_source = "rstac",
                             force = FALSE) {
   
@@ -283,12 +282,6 @@ extract_landsat <- function(aoi,
 }
 
 #' Internal Function to Create a Base URL with Microsoft Planetary Computer
-#'
-#' This function creates a base URL for extracting targeted images from the Microsoft Planetary Computer.
-#' It is used internally by other functions.
-#'
-#' @param base_url A character string representing the STAC URL for the image.
-#' @return A character string representing the base URL to extract the targeted image.
 #' @keywords internal
 make_vsicurl_url <- function(base_url) {
   paste0(
@@ -301,22 +294,6 @@ make_vsicurl_url <- function(base_url) {
 }
 
 #' Internal Function to Extract Landsat Imagery from STAC
-#'
-#' This function extracts Landsat imagery from the SpatioTemporal Asset Catalog (STAC)
-#' based on the specified parameters. It is used internally by other functions.
-#'
-#' @param aoi An `sf` object representing the area of interest.
-#' @param epsg A numeric value representing the EPSG code for the coordinate reference system.
-#' @param excl_dates A tibble containing dates to exclude.
-#' @param site_name A character string representing the name of the site.
-#' @param sats A character vector representing the satellites to use (default is c("LT04","LT05","LE07","LC08","LC09")).
-#' @param start_date A character string representing the start date for the imagery.
-#' @param end_date A character string representing the end date for the imagery.
-#' @param months A numeric vector representing the months to include.
-#' @param minclouds A numeric value representing the minimum cloud cover percentage.
-#' @param area_landsat_dir A character string representing the directory where Landsat imagery will be saved.
-#' @param workers A numeric value representing the number of workers for parallel processing.
-#' @return A tibble containing the metadata of the downloaded Landsat scenes.
 #' @keywords internal
 extract_landsat_stac <- function(aoi,
                                  epsg,
@@ -451,12 +428,6 @@ extract_landsat_stac <- function(aoi,
 }
 
 #' Internal Function to Extract Landsat Imagery from STAC
-#'
-#' @param ft A STAC feature queried from MPC.
-#' @param aoi An `sf` object representing the area of interest.
-#' @param area_landsat_dir A character string representing the directory where Landsat imagery will be saved.
-#' @param tempdir A character string representing the temporary directory where Landsat imagery will be saved.
-#' @return FALSE or TRUE depending on the success of the downloading.
 #' @keywords internal
 process_feature <- function(ft, area_landsat_dir, aoi, tempdir) {
   # ft <- it_obj$features[[1]]
@@ -521,12 +492,6 @@ process_feature <- function(ft, area_landsat_dir, aoi, tempdir) {
 }
 
 #' Internal Function to Extract Landsat Imagery from STAC
-#'
-#' @param it_obj A collection of STAC features queried from MPC.
-#' @param aoi An `sf` object representing the area of interest.
-#' @param area_landsat_dir A character string representing the directory where Landsat imagery will be saved.
-#' @param workers A numeric value representing the number of workers for parallel processing.
-#' @return A list of logical FALSE or TRUE depending on the success of the downloads.
 #' @keywords internal
 process_features_in_parallel <- function(it_obj, area_landsat_dir, aoi, workers) {
   # Check the operating system
@@ -556,10 +521,6 @@ process_features_in_parallel <- function(it_obj, area_landsat_dir, aoi, workers)
 }
 
 #' Internal Function to check if raster files work properly
-#'
-#' @param image A character string representing the file name.
-#' @param image_dir A character string representing directory for the files.
-#' @return A character vector representing the raster files that did not work.
 #' @keywords internal
 check_raster <- function(image, image_dir){
   
@@ -580,10 +541,6 @@ check_raster <- function(image, image_dir){
 }
 
 #' Internal Function to calculate cloud cover within the rasters
-#'
-#' @param image A character string representing the file name.
-#' @param image_dir A character string representing directory for the files.
-#' @return A tibble with fill, cloud, and clear proportions.
 #' @keywords internal
 calc_coverages <- function(image, image_dir){
   # image <- lss$file[[5]]

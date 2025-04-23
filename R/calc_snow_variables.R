@@ -6,7 +6,8 @@
 #' @param image_df A tibble, the output from the `extract_landsat` or `search_image_df` functions.
 #' @param site_name A character string representing the name of the site.
 #' @param base_landsat_dir A character string representing the base directory for Landsat imagery.
-#' @param workers A numeric value representing the number of workers for parallel processing.
+#' @param workers A numeric value representing the number of workers for parallel processing. 
+#' Setting workers > 1 (default) enables parallel computing across multiple nodes.
 #' @return A SpatRaster object containing the snow variables.
 #' @examples
 #' \dontrun{
@@ -14,7 +15,7 @@
 #' }
 #' @export
 #' @import dplyr sf terra lubridate stringr parallel tibble mgcv purrr tidyr zoo
-calc_snow_variables <- function(image_df, site_name, base_landsat_dir, workers) {
+calc_snow_variables <- function(image_df, site_name, base_landsat_dir, workers = 1) {
   # Define directories for classifications and predictors
   class_landsat_dir <- paste0(base_landsat_dir, "/", site_name, "/classifications")
   predictor_dir <- paste0(base_landsat_dir, "/", site_name, "/predictors")
@@ -193,12 +194,6 @@ calc_snow_variables <- function(image_df, site_name, base_landsat_dir, workers) 
 }
 
 #' Internal Function to Read Classifications
-#'
-#' This function reads classified rasters and prepares them for further processing.
-#'
-#' @param imagedf A tibble containing the metadata of the classified images.
-#' @param basedir A character string representing the base directory for the classified images.
-#' @return A list of SpatRaster objects.
 #' @keywords internal
 read_classifications <- function(imagedf, basedir) {
   rs <- lapply(imagedf$file, function(x) {
@@ -225,12 +220,6 @@ read_classifications <- function(imagedf, basedir) {
 }
 
 #' Internal Function to Calculate Snow Melting Day and Trend
-#'
-#' This function calculates the snow melting day (SCD) and trend for a given cell.
-#'
-#' @param d_all A data frame containing snow and no-snow values for a given cell.
-#' @param extradf An optional data frame containing extra days for prediction.
-#' @return A data frame containing the calculated snow variables.
 #' @keywords internal
 cal_scd <- function(d_all, extradf) {
   # d_all <- mm %>% mutate(cell2 = cell) %>% nest(data = -cell2) %>% slice(1) %>% pull(data)
@@ -318,11 +307,6 @@ cal_scd <- function(d_all, extradf) {
 }
 
 #' Internal Function to Prepare No-Snow Values
-#'
-#' This function prepares no-snow values for further processing.
-#'
-#' @param x A SpatRaster object.
-#' @return A data frame containing no-snow and snow values.
 #' @keywords internal
 nosnow_values <- function(x) {
   r <- x

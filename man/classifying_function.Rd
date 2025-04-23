@@ -21,39 +21,7 @@ classifying_function(
   dem
 )
 }
-\arguments{
-\item{imageid}{A character string representing the file name of the Landsat image.}
-
-\item{image_df}{A tibble containing the metadata of the Landsat images.}
-
-\item{predictor_dir}{A character string representing the directory containing the predictor rasters.}
-
-\item{class_landsat_dir}{A character string representing the directory to save the classified rasters.}
-
-\item{base_landsat_dir}{A character string representing the base directory for Landsat imagery.}
-
-\item{site_name}{A character string representing the name of the site.}
-
-\item{force}{Logical, if TRUE classification will be run also for images with previously classified.}
-
-\item{mod8}{A pretrained model for Landsat-8 imagery.}
-
-\item{mod7}{A pretrained model for Landsat-7 imagery.}
-
-\item{mod5}{A pretrained model for Landsat-5 imagery.}
-
-\item{slope}{A raster object representing the slope.}
-
-\item{esalc}{A raster object representing the ESRI Land Cover.}
-
-\item{esaw}{A raster object representing the ESRI Water.}
-
-\item{dem}{A raster object representing the Digital Elevation Model.}
-}
-\value{
-The file name of the classified raster.
-}
 \description{
-This function classifies a single Landsat image using pretrained models and various predictors.
+Internal Function to Classify a Single Landsat Image
 }
 \keyword{internal}

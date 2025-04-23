@@ -4,7 +4,7 @@
 \alias{calc_snow_variables}
 \title{Calculate Snow Variables}
 \usage{
-calc_snow_variables(image_df, site_name, base_landsat_dir, workers)
+calc_snow_variables(image_df, site_name, base_landsat_dir, workers = 1)
 }
 \arguments{
 \item{image_df}{A tibble, the output from the \code{extract_landsat} or \code{search_image_df} functions.}
@@ -13,7 +13,8 @@ calc_snow_variables(image_df, site_name, base_landsat_dir, workers)
 
 \item{base_landsat_dir}{A character string representing the base directory for Landsat imagery.}
 
-\item{workers}{A numeric value representing the number of workers for parallel processing.}
+\item{workers}{A numeric value representing the number of workers for parallel processing.
+Setting workers > 1 (default) enables parallel computing across multiple nodes.}
 }
 \value{
 A SpatRaster object containing the snow variables.

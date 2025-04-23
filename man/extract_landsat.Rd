@@ -7,16 +7,14 @@
 extract_landsat(
   aoi,
   site_name,
-  aoi_size = 5,
-  start_date = "2013-01-01",
-  end_date = Sys.Date(),
+  aoi_size = 2,
+  start_date = "2020-01-01",
+  end_date = "2024-12-01",
   months = 1:12,
   sats = "LC08",
   minclouds = 50,
-  my_timeout = 400,
-  info_timeout = 60,
   base_landsat_dir,
-  workers,
+  workers = 1,
   data_source = "rstac",
   force = FALSE
 )
@@ -26,23 +24,24 @@ extract_landsat(
 
 \item{site_name}{A character string representing the name of the site.}
 
-\item{aoi_size}{A numeric value representing the size of the AOI in kilometers (default is 5).}
+\item{aoi_size}{A numeric value representing the size of the AOI in kilometers.}
 
-\item{start_date}{A character string representing the start date for the imagery (default is "2013-01-01").}
+\item{start_date}{A character string representing the start date for the imagery.}
 
-\item{end_date}{A character string representing the end date for the imagery (default is the current date).}
+\item{end_date}{A character string representing the end date for the imagery.}
 
-\item{months}{A numeric vector representing the months to include (default is 1:12).}
+\item{months}{A numeric vector representing the months to include (default is all months, so 1:12).}
 
-\item{sats}{A character string representing the satellite to use (default is "LC08").}
+\item{sats}{A character string representing the satellite to use (default is Landsat-8 only, so "LC08").}
 
 \item{minclouds}{A numeric value representing the minimum cloud cover percentage (default is 50).}
 
 \item{base_landsat_dir}{A character string representing the base directory for Landsat imagery.}
 
-\item{workers}{A numeric value representing the number of workers for parallel processing.}
+\item{workers}{A numeric value representing the number of workers for parallel processing.
+Setting workers > 1 (default) enables parallel computing across multiple nodes.}
 
-\item{data_source}{A character string representing the data source (default is "rstac").}
+\item{data_source}{A character string representing the data source (currently only option is "rstac").}
 
 \item{force}{Logical, if TRUE deletes all previously downloaded imagery.}
 }

@@ -2,13 +2,13 @@
 #'
 #' This function downloads the pretrained model from a GitHub repository.
 #'
-#' @param model_name Character vector specifying for which satellites you want to download the models. Any of "TM04","TM05","LE07","LC08","LC09" or "ALL"
+#' @param model_names Character vector specifying for which satellites you want to download the models. Any of "TM04","TM05","LE07","LC08","LC09" or "ALL"
 #' @param model_dir Character, path to folder where the model objects will be stored.
 #' @param timeout Maximum time to use to download the files (á ~80MB). Defaults to 300 seconds. Increase if very slow network.
 #' @param force Logical. If FALSE (default) downloads the model object only if no previous model file exists.
 #' @examples
 #' \dontrun{
-#' download_model(model_name = "landsat_latest", model_dir = "path/to/your/model")
+#' download_model(model_names = "landsat_latest", model_dir = "path/to/your/model")
 #' }
 #' @export
 download_model <- function(model_names = c("TM04","TM05","LE07","LC08","LC09"), model_dir, timeout = 300, force = FALSE) {

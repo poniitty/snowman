@@ -6,14 +6,7 @@
 \usage{
 make_vsicurl_url(base_url)
 }
-\arguments{
-\item{base_url}{A character string representing the STAC URL for the image.}
-}
-\value{
-A character string representing the base URL to extract the targeted image.
-}
 \description{
-This function creates a base URL for extracting targeted images from the Microsoft Planetary Computer.
-It is used internally by other functions.
+Internal Function to Create a Base URL with Microsoft Planetary Computer
 }
 \keyword{internal}

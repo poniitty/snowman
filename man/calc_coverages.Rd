@@ -6,14 +6,6 @@
 \usage{
 calc_coverages(image, image_dir)
 }
-\arguments{
-\item{image}{A character string representing the file name.}
-
-\item{image_dir}{A character string representing directory for the files.}
-}
-\value{
-A tibble with fill, cloud, and clear proportions.
-}
 \description{
 Internal Function to calculate cloud cover within the rasters
 }
