@@ -11,7 +11,55 @@
 #' @param force Logical, if TRUE classification will be run also for images with previously classified.
 #' @return A list of file paths to the classified rasters.
 #' @examples
-#' classify_landsat(image_df, site_name = "ExampleSite", base_landsat_dir = "path/to/landsat", model_dir = "path/to/models")
+#' \dontrun{
+#' # The full workflow
+#' library(snowman)
+#' library(terra)
+#' 
+#' # Set the number of cores
+#' n_workers <- 4
+#' 
+#' # Replace with your own path where all data will be downloaded
+#' base_landsat_path <- "C:/MyTemp/RS/"
+#' 
+#' site <- "Sierra_nevada" # Name of the AOI
+#' aoi_point <- list(lon = -3.311665, lat = 37.053188) # center point of AOI
+#' 
+#' # Download Landsat-8 imagery
+#' image_df <- extract_landsat(aoi = aoi_point,
+#'                             site_name = site,
+#'                             base_landsat_dir = base_landsat_path,
+#'                             sats = "LC08",
+#'                             workers = n_workers)
+#' 
+#' # Calculate other geospatial information for the classifier
+#' calc_predictors(image_df, site_name = site, base_landsat_dir = base_landsat_path)
+#' 
+#' # Download pretrained Random forest classifier
+#' download_model(model_names = "LC08",
+#'                model_dir = base_landsat_path)
+#' 
+#' # Run the classification across imagery
+#' lss <- classify_landsat(image_df, 
+#'                         site_name = site, 
+#'                         base_landsat_dir = base_landsat_path, 
+#'                         model_dir = base_landsat_path, 
+#'                         workers = n_workers)
+#' 
+#' # Calculate snow variables over the AOI based on the classified imagery
+#' snow_vars <- calc_snow_variables(image_df, 
+#'                                  site_name = site, 
+#'                                  base_landsat_dir = base_landsat_path, 
+#'                                  workers = n_workers)
+#' 
+#' # Plot one of the resulting layers
+#' plot(snow_vars$scd, col = rev(topo.colors(100)), 
+#'      main = "Snow cover duration in Sierra Nevada")
+#' 
+#' # Save the resulting snow maps as GeoTiffs
+#' writeRaster(snow_vars, paste0(base_landsat_path, "/", site, "/", "snow_variables.tif"), 
+#'             datatype = "FLT4S")
+#' }
 #' @export
 #' @import rstac dplyr sf terra lubridate stringr parallel tibble solartime randomForestSRC
 classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir, workers, force = FALSE) {
@@ -83,26 +131,7 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir, w
   return(unlist(lss))
 }
 
-#' Internal Function to Classify a Single Landsat Image
-#'
-#' This function classifies a single Landsat image using pretrained models and various predictors.
-#'
-#' @param imageid A character string representing the file name of the Landsat image.
-#' @param image_df A tibble containing the metadata of the Landsat images.
-#' @param predictor_dir A character string representing the directory containing the predictor rasters.
-#' @param class_landsat_dir A character string representing the directory to save the classified rasters.
-#' @param base_landsat_dir A character string representing the base directory for Landsat imagery.
-#' @param site_name A character string representing the name of the site.
-#' @param force Logical, if TRUE classification will be run also for images with previously classified.
-#' @param mod8 A pretrained model for Landsat-8 imagery.
-#' @param mod7 A pretrained model for Landsat-7 imagery.
-#' @param mod5 A pretrained model for Landsat-5 imagery.
-#' @param slope A raster object representing the slope.
-#' @param esalc A raster object representing the ESRI Land Cover.
-#' @param esaw A raster object representing the ESRI Water.
-#' @param dem A raster object representing the Digital Elevation Model.
-#' @return The file name of the classified raster.
-#' @keywords internal
+# Internal Function to Classify a Single Landsat Image
 classifying_function <- function(imageid, image_df, predictor_dir, class_landsat_dir,
                                  base_landsat_dir, site_name, force = FALSE,
                                  mod8, mod7, mod5, slope, esalc, esaw, dem) {
@@ -408,9 +437,7 @@ classifying_function <- function(imageid, image_df, predictor_dir, class_landsat
 }
 
 
-#' Internal helper function to calculate a mode
-#'
-#' @keywords internal
+# Internal helper function to calculate a mode
 getmode <- function(v) {
   uniqv <- unique(v)
   uniqv[which.max(tabulate(match(v, uniqv)))]

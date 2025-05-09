@@ -1,13 +1,13 @@
-#' UTM zones Geopackage file
+#' UTM Zones
 #'
-#' A Geopackage file with UTM zones as polygons.
+#' A dataset containing the Universal Transverse Mercator (UTM) zone information.
 #'
-#' @format A data frame with 10 rows and 2 variables:
+#' @format A data frame with X rows and Y variables:
 #' \describe{
-#'   \item{ZONE}{The UTM zone identifier}
+#'   \item{zone}{Zone number}
+#'   \item{hemisphere}{"N" or "S"}
+#'   \item{epsg}{EPSG code for the zone}
+#'   ...
 #' }
-#' @source Created for demonstration purposes.
-#' @keywords datasets
-#' @name utm_zones
-#' @export
-NULL
+#' @source Source of the data, if applicable
+"utm_zones"

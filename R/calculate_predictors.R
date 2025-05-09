@@ -10,7 +10,55 @@
 #' @param data_source A character string representing the data source (default is "rstac").
 #' @return Raster files written to disk.
 #' @examples
-#' calc_predictors(image_df, site_name = "ExampleSite", base_landsat_dir = "path/to/landsat")
+#' \dontrun{
+#' # The full workflow
+#' library(snowman)
+#' library(terra)
+#' 
+#' # Set the number of cores
+#' n_workers <- 4
+#' 
+#' # Replace with your own path where all data will be downloaded
+#' base_landsat_path <- "C:/MyTemp/RS/"
+#' 
+#' site <- "Sierra_nevada" # Name of the AOI
+#' aoi_point <- list(lon = -3.311665, lat = 37.053188) # center point of AOI
+#' 
+#' # Download Landsat-8 imagery
+#' image_df <- extract_landsat(aoi = aoi_point,
+#'                             site_name = site,
+#'                             base_landsat_dir = base_landsat_path,
+#'                             sats = "LC08",
+#'                             workers = n_workers)
+#' 
+#' # Calculate other geospatial information for the classifier
+#' calc_predictors(image_df, site_name = site, base_landsat_dir = base_landsat_path)
+#' 
+#' # Download pretrained Random forest classifier
+#' download_model(model_names = "LC08",
+#'                model_dir = base_landsat_path)
+#' 
+#' # Run the classification across imagery
+#' lss <- classify_landsat(image_df, 
+#'                         site_name = site, 
+#'                         base_landsat_dir = base_landsat_path, 
+#'                         model_dir = base_landsat_path, 
+#'                         workers = n_workers)
+#' 
+#' # Calculate snow variables over the AOI based on the classified imagery
+#' snow_vars <- calc_snow_variables(image_df, 
+#'                                  site_name = site, 
+#'                                  base_landsat_dir = base_landsat_path, 
+#'                                  workers = n_workers)
+#' 
+#' # Plot one of the resulting layers
+#' plot(snow_vars$scd, col = rev(topo.colors(100)), 
+#'      main = "Snow cover duration in Sierra Nevada")
+#' 
+#' # Save the resulting snow maps as GeoTiffs
+#' writeRaster(snow_vars, paste0(base_landsat_path, "/", site, "/", "snow_variables.tif"), 
+#'             datatype = "FLT4S")
+#' }
 #' @export
 #' @import rstac dplyr sf terra lubridate stringr parallel tibble readr
 calc_predictors <- function(image_df, site_name, base_landsat_dir, data_source = "rstac") {
@@ -413,14 +461,7 @@ calc_predictors <- function(image_df, site_name, base_landsat_dir, data_source =
 }
 
 
-#' Internal Function to Create a Base URL with Microsoft Planetary Computer
-#'
-#' This function creates a base URL for extracting targeted ALOS DEMs from the Microsoft Planetary Computer.
-#' It is used internally by other functions.
-#'
-#' @param base_url A character string representing the STAC URL for the image.
-#' @return A character string representing the base URL to extract the targeted DEM file.
-#' @keywords internal
+# Internal Function to Create a Base URL with Microsoft Planetary Computer
 make_vsicurl_url_dem <- function(base_url) {
   paste0(
     "/vsicurl", 
@@ -430,14 +471,8 @@ make_vsicurl_url_dem <- function(base_url) {
     base_url
   )
 }
-#' Internal Function to Create a Base URL with Microsoft Planetary Computer
-#'
-#' This function creates a base URL for extracting targeted ESA WorldCover data from the Microsoft Planetary Computer.
-#' It is used internally by other functions.
-#'
-#' @param base_url A character string representing the STAC URL for the image.
-#' @return A character string representing the base URL to extract the targeted DEM file.
-#' @keywords internal
+
+# Internal Function to Create a Base URL with Microsoft Planetary Computer
 make_vsicurl_url_esa <- function(base_url) {
   paste0(
     "/vsicurl", 
@@ -448,9 +483,7 @@ make_vsicurl_url_esa <- function(base_url) {
   )
 }
 
-#' Internal Functions to extract pixel information from the Landsat Quality Assesment (QA) layer
-#'
-#' @keywords internal
+# Internal Functions to extract pixel information from the Landsat Quality Assesment (QA) layer
 mask_fill <- function(x) {as.numeric(intToBits(x)[1])}
 mask_dilcloud <- function(x) {as.numeric(intToBits(x)[2])}
 mask_cloud <- function(x) {as.numeric(intToBits(x)[4])}
