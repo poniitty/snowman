@@ -54,22 +54,22 @@ calc_snow_variables <- function(image_df, site_name, base_landsat_dir, workers) 
     filter(cloud_proportion_own < 0.80)
   
   if (nrow(image_df) >= 50) {
-    # Fit a generalized additive model (GAM) to predict snow proportion
-    image_df %>%
-      filter(clear_proportion_own > 0.8 & fill_proportion < 0.2) %>%
-      mutate(doy = yday(date)) %>%
-      gam(snow_proportion_own ~ s(doy, bs = "cc"), data = ., knots = list(doy = c(1, 365)), family = "binomial") -> gmod
-    
-    # Create a prediction data frame
-    preds <- tibble(doy = 1:365)
-    preds$preds <- predict(gmod, preds, type = "response")
-    
-    # Determine the day of the year with the maximum snow proportion
-    maxsnowdoy <- preds$doy[which.max(preds$preds)]
-    maxsnowdoy <- ifelse(maxsnowdoy > 250, 30, maxsnowdoy)
-    maxsnowdoy <- ifelse(maxsnowdoy < (image_df %>% mutate(doy = yday(date)) %>% pull(doy) %>% min) + 14,
-                         (image_df %>% mutate(doy = yday(date)) %>% pull(doy) %>% min) + 14, maxsnowdoy)
-    minsnowdoy <- preds$doy[which.min(preds$preds)]
+    # # Fit a generalized additive model (GAM) to predict snow proportion
+    # image_df %>%
+    #   filter(clear_proportion_own > 0.8 & fill_proportion < 0.2) %>%
+    #   mutate(doy = yday(date)) %>%
+    #   gam(snow_proportion_own ~ s(doy, bs = "cc"), data = ., knots = list(doy = c(1, 365)), family = "binomial") -> gmod
+    # 
+    # # Create a prediction data frame
+    # preds <- tibble(doy = 1:365)
+    # preds$preds <- predict(gmod, preds, type = "response")
+    # 
+    # # Determine the day of the year with the maximum snow proportion
+    # maxsnowdoy <- preds$doy[which.max(preds$preds)]
+    # maxsnowdoy <- ifelse(maxsnowdoy > 250, 30, maxsnowdoy)
+    # maxsnowdoy <- ifelse(maxsnowdoy < (image_df %>% mutate(doy = yday(date)) %>% pull(doy) %>% min) + 14,
+    #                      (image_df %>% mutate(doy = yday(date)) %>% pull(doy) %>% min) + 14, maxsnowdoy)
+    # minsnowdoy <- preds$doy[which.min(preds$preds)]
     
     # Read the classified rasters
     rs <- read_classifications(image_df, class_landsat_dir)
