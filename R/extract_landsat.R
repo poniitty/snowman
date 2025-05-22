@@ -198,8 +198,6 @@ extract_landsat <- function(aoi,
     os <- Sys.info()["sysname"]
     
     if (os == "Windows") {
-      # Use future_lapply on Windows
-      plan(multisession, workers = workers)
       img_remove <- unlist(lapply(lss$file, check_raster, image_dir = area_landsat_dir))
     } else {
       # Use mclapply on unix
