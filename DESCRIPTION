@@ -28,7 +28,8 @@ Imports:
     mgcv,
     purrr,
     tidyr,
-    zoo
+    zoo,
+    ggplot2
 Suggests:
     testthat
 Depends: 

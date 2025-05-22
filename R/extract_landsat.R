@@ -69,7 +69,7 @@
 #'             datatype = "FLT4S")
 #' }
 #' @export
-#' @import rstac dplyr sf terra lubridate stringr parallel tibble readr
+#' @import rstac dplyr sf terra lubridate stringr parallel tibble readr ggplot2
 extract_landsat <- function(aoi,
                             site_name,
                             aoi_size = 2,
