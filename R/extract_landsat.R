@@ -198,10 +198,9 @@ extract_landsat <- function(aoi,
     os <- Sys.info()["sysname"]
     
     if (os == "Windows") {
-      # Use parLapply on Windows
-      cl <- makeCluster(workers)
-      on.exit(stopCluster(cl))
-      img_remove <- unlist(parLapply(cl, lss$file, check_raster, image_dir = area_landsat_dir))
+      # Use future_lapply on Windows
+      plan(multisession, workers = workers)
+      img_remove <- unlist(lapply(lss$file, check_raster, image_dir = area_landsat_dir))
     } else {
       # Use mclapply on unix
       img_remove <- unlist(mclapply(lss$file, check_raster, image_dir = area_landsat_dir, mc.cores = workers))
@@ -256,10 +255,7 @@ extract_landsat <- function(aoi,
     
     # Check if all rasters are working. Remove corrupted files.
     if (os == "Windows") {
-      # Use parLapply on Windows
-      cl <- makeCluster(workers)
-      on.exit(stopCluster(cl))
-      img_remove <- unlist(parLapply(cl, lss$file, check_raster, image_dir = area_landsat_dir))
+      img_remove <- unlist(lapply(lss$file, check_raster, image_dir = area_landsat_dir))
     } else {
       # Use mclapply on unix
       img_remove <- unlist(mclapply(lss$file, check_raster, image_dir = area_landsat_dir, mc.cores = workers))
@@ -299,7 +295,6 @@ extract_landsat <- function(aoi,
     # First round of selection
     # remove images with very limited clear coverage over the AOI
     if (os == "Windows") {
-      # Use parLapply on Windows
       cl <- makeCluster(workers)
       on.exit(stopCluster(cl))
       lccs <- parLapply(cl, lss$file, calc_coverages, image_dir = area_landsat_dir) %>%
