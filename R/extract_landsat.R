@@ -83,7 +83,7 @@ extract_landsat <- function(aoi,
                             data_source = "rstac",
                             force = FALSE) {
   
-  # load(file = "data/utm_zones.RData")
+  # load(file = "data/utm_zones.rda")
   utmall <- utm_zones
   
   suppressWarnings({
@@ -495,6 +495,7 @@ process_feature <- function(ft, area_landsat_dir, aoi, tempdir) {
     file_names <- gsub("TIF$", "tif", basename(full_url))
     
     juuh <- lapply(seq_len(length(full_url)), function(nr) {
+      # nr <- 1
       e <- try({
         gdal_utils(
           "warp",
