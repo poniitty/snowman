@@ -14,7 +14,8 @@ Before you start, make sure you have the `snowman` package installed. You can in
 # Install the snowman package from GitHub
 devtools::install_github("poniitty/snowman")
 ```
-<span style="color:blue">**Notice!** Keep the dependent packages and R updated! Older versions have caused problems with the parallelization.</span>.
+❗**Note!** Keep the dependent packages and R updated! Older versions have caused problems with the parallelization.❗
+
 
 ## Load required libraries
 
