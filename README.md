@@ -4,7 +4,7 @@ The `snowman` package is designed to map snow cover dynamics across landscapes b
 
 The following code will introduce all the main functions of the package and produce the maps of snow conditions (such as snow cover duration) in Mount Olympos in Greece averaged over 2020-2024.
 
-Note! High canopy cover of evergreen trees greatly lowers the accurracy of the algorhitm, thus interpret the results extra carefully if applying the method outside treeless regions.
+Note! High canopy cover of evergreen trees greatly lowers the accurracy of the algorithm, thus interpret the results extra carefully if applying the method outside treeless regions.
 
 ## Prerequisites
 
@@ -14,6 +14,7 @@ Before you start, make sure you have the `snowman` package installed. You can in
 # Install the snowman package from GitHub
 devtools::install_github("poniitty/snowman")
 ```
+<span style="color:blue">**Notice!** Keep the dependent packages and R updated! Older versions have caused problems with the parallelization.</span>.
 
 ## Load required libraries
 
