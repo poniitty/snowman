@@ -405,6 +405,7 @@ extract_landsat_stac <- function(aoi,
       mutate(n = n()) %>%
       arrange(desc(n)) %>% mutate(gid = cur_group_id()) %>% group_split()
     
+    sf::sf_use_s2(FALSE)
     suppressMessages({
       suppressWarnings({
         tt <- lapply(tt, function(x) {
@@ -420,6 +421,7 @@ extract_landsat_stac <- function(aoi,
         }) %>% bind_rows()
       })
     })
+    sf::sf_use_s2(TRUE)
     
     itst <- itst %>%
       filter(`landsat:scene_id` %in% (tt %>% pull(`landsat:scene_id`)))
