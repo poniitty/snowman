@@ -157,6 +157,7 @@ extract_landsat <- function(aoi,
                                 aoi = aoi, site_name = site_name, epsg = epsg, excl_dates = tif_dates,
                                 sats = sats, area_landsat_dir = area_landsat_dir, minclouds = minclouds)
   }
+  gc()
   
   if (is.null(lss)) {
     lss <- tibble(id = NULL,
@@ -203,6 +204,7 @@ extract_landsat <- function(aoi,
       # Use mclapply on unix
       img_remove <- unlist(mclapply(lss$file, check_raster, image_dir = area_landsat_dir, mc.cores = workers))
     }
+    gc()
     
     
     if (length(img_remove) > 0) {
@@ -219,6 +221,7 @@ extract_landsat <- function(aoi,
                                     aoi = aoi, site_name = site_name, epsg = epsg, excl_dates = tif_dates,
                                     sats = sats, area_landsat_dir = area_landsat_dir, minclouds = minclouds)
       }
+      gc()
       
       if (is.null(lss)) {
         lss <- tibble(id = NULL,
@@ -258,6 +261,7 @@ extract_landsat <- function(aoi,
       # Use mclapply on unix
       img_remove <- unlist(mclapply(lss$file, check_raster, image_dir = area_landsat_dir, mc.cores = workers))
     }
+    gc()
     
     if (length(img_remove) > 0) {
       print(paste0(length(img_remove), " raster(s) not functional. REMOVED!!"))
@@ -302,6 +306,7 @@ extract_landsat <- function(aoi,
       lccs <- mclapply(lss$file, calc_coverages, image_dir = area_landsat_dir, mc.cores = workers) %>%
         bind_rows
     }
+    gc()
     
     lss <- full_join(lss %>% select(-ends_with("proportion")), lccs, by = "file")
     
@@ -397,67 +402,72 @@ extract_landsat_stac <- function(aoi,
     itst <- items_as_sf(it_obj) %>% st_make_valid()
     itst <- st_crop(itst, aoi %>% st_transform(st_crs(itst)))
     
-    itst$area <- as.numeric(st_area(itst)) / (1000 * 1000)
-    
-    tt <- itst %>%
-      mutate(date = as_date(ymd_hms(datetime))) %>%
-      group_by(date, instruments, `landsat:wrs_path`, .add = TRUE) %>%
-      mutate(n = n()) %>%
-      arrange(desc(n)) %>% mutate(gid = cur_group_id()) %>% group_split()
-    
-    suppressMessages({
-      suppressWarnings({
-        sf::sf_use_s2(FALSE)
-        tt <- lapply(tt, function(x) {
-          if (nrow(x) > 1) {
-            if (diff(x %>% pull(area)) == 0) {
-              x <- x %>% slice(1)
-            } else {
-              stint <- st_intersection(x) %>% st_make_valid() %>% slice(2) %>% st_area %>% as.numeric()
-              x <- x %>% filter(area > stint / (1000 * 1000) + 1)
+    if(nrow(itst) > 0){
+      itst$area <- as.numeric(st_area(itst)) / (1000 * 1000)
+      
+      tt <- itst %>%
+        mutate(date = as_date(ymd_hms(datetime))) %>%
+        group_by(date, instruments, `landsat:wrs_path`, .add = TRUE) %>%
+        mutate(n = n()) %>%
+        arrange(desc(n)) %>% mutate(gid = cur_group_id()) %>% group_split()
+      
+      suppressMessages({
+        suppressWarnings({
+          sf::sf_use_s2(FALSE)
+          tt <- lapply(tt, function(x) {
+            if (nrow(x) > 1) {
+              if (diff(x %>% pull(area)) == 0) {
+                x <- x %>% slice(1)
+              } else {
+                stint <- st_intersection(x) %>% st_make_valid() %>% slice(2) %>% st_area %>% as.numeric()
+                x <- x %>% filter(area > stint / (1000 * 1000) + 1)
+              }
             }
-          }
-          return(x)
-        }) %>% bind_rows()
-        sf::sf_use_s2(TRUE)
+            return(x)
+          }) %>% bind_rows()
+          sf::sf_use_s2(TRUE)
+        })
       })
-    })
-    
-    itst <- itst %>%
-      filter(`landsat:scene_id` %in% (tt %>% pull(`landsat:scene_id`)))
-    
-    it_obj <- it_obj %>%
-      items_filter(filter_fn = function(x) { x$properties$`landsat:scene_id` %in% (itst %>% pull(`landsat:scene_id`)) })
-    
-    
-    juuh <- process_features_in_parallel(it_obj, area_landsat_dir, aoi, workers)
-    
-    itst$platform <- itst$platform %>%
-      ifelse(. == "landsat-4", "LT04", .) %>%
-      ifelse(. == "landsat-5", "LT05", .) %>%
-      ifelse(. == "landsat-7", "LE07", .) %>%
-      ifelse(. == "landsat-8", "LC08", .) %>%
-      ifelse(. == "landsat-9", "LC09", .)
-    
-    tifs <- list.files(area_landsat_dir, pattern = "GMT.tif$")
-    
-    idsALL <- itst %>%
-      mutate(date = gsub("-", "", as_date(ymd_hms(datetime)))) %>%
-      mutate(date2 = gsub("-", "", as_date(ymd_hms(created)))) %>%
-      mutate(time = paste0(gsub(":", "", substr(datetime, 12, 19)), "GMT.tif")) %>%
-      mutate(file = paste0(platform, "_", `landsat:correction`, "_",
-                           `landsat:wrs_path`, `landsat:wrs_row`, "_",
-                           date, "_", date2, "_",
-                           `landsat:collection_number`, "_", `landsat:collection_category`, "_",
-                           time)) %>%
-      select(file, date, `eo:cloud_cover`, `view:sun_elevation`) %>%
-      rename(DATE_ACQUIRED = date,
-             CLOUD_COVER = `eo:cloud_cover`,
-             SUN_ELEVATION = `view:sun_elevation`) %>%
-      st_drop_geometry() %>%
-      filter(file %in% tifs) %>%
-      mutate(DATE_ACQUIRED = ymd(DATE_ACQUIRED)) %>%
-      rownames_to_column("id")
+      
+      itst <- itst %>%
+        filter(`landsat:scene_id` %in% (tt %>% pull(`landsat:scene_id`)))
+      
+      it_obj <- it_obj %>%
+        items_filter(filter_fn = function(x) { x$properties$`landsat:scene_id` %in% (itst %>% pull(`landsat:scene_id`)) })
+      
+      
+      juuh <- process_features_in_parallel(it_obj, area_landsat_dir, aoi, workers)
+      
+      itst$platform <- itst$platform %>%
+        ifelse(. == "landsat-4", "LT04", .) %>%
+        ifelse(. == "landsat-5", "LT05", .) %>%
+        ifelse(. == "landsat-7", "LE07", .) %>%
+        ifelse(. == "landsat-8", "LC08", .) %>%
+        ifelse(. == "landsat-9", "LC09", .)
+      
+      tifs <- list.files(area_landsat_dir, pattern = "GMT.tif$")
+      
+      idsALL <- itst %>%
+        mutate(date = gsub("-", "", as_date(ymd_hms(datetime)))) %>%
+        mutate(date2 = gsub("-", "", as_date(ymd_hms(created)))) %>%
+        mutate(time = paste0(gsub(":", "", substr(datetime, 12, 19)), "GMT.tif")) %>%
+        mutate(file = paste0(platform, "_", `landsat:correction`, "_",
+                             `landsat:wrs_path`, `landsat:wrs_row`, "_",
+                             date, "_", date2, "_",
+                             `landsat:collection_number`, "_", `landsat:collection_category`, "_",
+                             time)) %>%
+        select(file, date, `eo:cloud_cover`, `view:sun_elevation`) %>%
+        rename(DATE_ACQUIRED = date,
+               CLOUD_COVER = `eo:cloud_cover`,
+               SUN_ELEVATION = `view:sun_elevation`) %>%
+        st_drop_geometry() %>%
+        filter(file %in% tifs) %>%
+        mutate(DATE_ACQUIRED = ymd(DATE_ACQUIRED)) %>%
+        rownames_to_column("id")
+    } else {
+      print("No new Landsat scenes downloaded!")
+      idsALL <- NULL
+    }
   } else {
     print("No new Landsat scenes downloaded!")
     idsALL <- NULL
