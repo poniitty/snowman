@@ -405,9 +405,9 @@ extract_landsat_stac <- function(aoi,
       mutate(n = n()) %>%
       arrange(desc(n)) %>% mutate(gid = cur_group_id()) %>% group_split()
     
-    sf::sf_use_s2(FALSE)
     suppressMessages({
       suppressWarnings({
+        sf::sf_use_s2(FALSE)
         tt <- lapply(tt, function(x) {
           if (nrow(x) > 1) {
             if (diff(x %>% pull(area)) == 0) {
@@ -419,9 +419,9 @@ extract_landsat_stac <- function(aoi,
           }
           return(x)
         }) %>% bind_rows()
+        sf::sf_use_s2(TRUE)
       })
     })
-    sf::sf_use_s2(TRUE)
     
     itst <- itst %>%
       filter(`landsat:scene_id` %in% (tt %>% pull(`landsat:scene_id`)))
