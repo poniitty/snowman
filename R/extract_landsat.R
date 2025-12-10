@@ -422,11 +422,20 @@ extract_landsat_stac <- function(aoi, epsg, excl_dates, site_name,
 # Internal Function to Extract Landsat Imagery from STAC
 process_features_in_parallel <- function(it_obj, area_landsat_dir, aoi, workers) {
   
+  item_temp <- it_obj$features[[which(lapply(it_obj$features, function(x) x$properties$`proj:epsg`) %>% unlist == epsg)[[1]]]]
+  
+  tmp_url <- make_vsicurl_url(rstac::assets_url(item_temp)[[1]])
+  
+  r_template <- terra::crop(terra::rast(tmp_url), aoi %>% sf::st_transform(crs = epsg))
+  
+  
   juuh <- future.apply::future_lapply(
     it_obj$features, 
     process_feature, 
     area_landsat_dir = area_landsat_dir, 
     aoi = aoi,
+    exte = as.numeric(sf::st_bbox(r_template))[c(1,3,2,4)],
+    reso = terra::res(r_template)[1],
     future.packages = c("sf", "terra", "stringr", "rstac"),
     future.seed = TRUE,
     future.scheduling = 10 # Chunking to prevent FD exhaustion
@@ -435,9 +444,10 @@ process_features_in_parallel <- function(it_obj, area_landsat_dir, aoi, workers)
   return(juuh)
 }
 
-# ft <- it_obj$features[[34]]
+
+# ft <- it_obj$features[[3]]
 # Internal Function to Extract Landsat Imagery from STAC
-process_feature <- function(ft, area_landsat_dir, aoi) {
+process_feature <- function(ft, area_landsat_dir, aoi, exte, reso) {
   
   # Helper function (if defined globally, ensure it's in future.globals)
   make_vsicurl_url <- function(base_url) {
@@ -480,8 +490,8 @@ process_feature <- function(ft, area_landsat_dir, aoi) {
         # C. Project to the AOI CRS (necessary if the source projection is different)
         # Note: 'aoi' must be an sf or sfc object with a CRS for project() to work.
         template_raster <- terra::rast(
-          extent = terra::ext(sf::st_bbox(aoi)),
-          resolution = 30, # Forced 30m resolution
+          extent = terra::ext(exte),
+          resolution = reso, # Forced 30m resolution
           crs = sf::st_crs(aoi)$wkt
         )
         r_cropped <- terra::project(r_cropped, template_raster, method = "near")
