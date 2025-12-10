@@ -375,7 +375,7 @@ extract_landsat_stac <- function(aoi, epsg, excl_dates, site_name,
         items_filter(filter_fn = function(x) { x$properties$`landsat:scene_id` %in% (itst %>% pull(`landsat:scene_id`)) })
       
       # --- CALL PROCESSING IN PARALLEL (FUTURE) ---
-      juuh <- process_features_in_parallel(it_obj, area_landsat_dir, aoi, workers)
+      juuh <- process_features_in_parallel(it_obj, area_landsat_dir, aoi, workers, epsg = epsg)
       
       # Renaming platforms for compatibility
       itst$platform <- case_when(
@@ -420,7 +420,7 @@ extract_landsat_stac <- function(aoi, epsg, excl_dates, site_name,
 
 # Internal Function to Extract Landsat Imagery from STAC
 # Internal Function to Extract Landsat Imagery from STAC
-process_features_in_parallel <- function(it_obj, area_landsat_dir, aoi, workers) {
+process_features_in_parallel <- function(it_obj, area_landsat_dir, aoi, workers, epsg) {
   
   item_temp <- it_obj$features[[which(lapply(it_obj$features, function(x) x$properties$`proj:epsg`) %>% unlist == epsg)[[1]]]]
   
