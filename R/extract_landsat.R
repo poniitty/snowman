@@ -475,13 +475,16 @@ process_feature <- function(ft, area_landsat_dir, aoi) {
         }
         
         # B. Crop to the AOI extent (subsetting the remote file)
-        r_cropped <- terra::crop(r_remote, aoi %>% st_transform(st_crs(r_remote)))
+        r_cropped <- terra::crop(r_remote, aoi %>% sf::st_transform(sf::st_crs(r_remote)))
         
         # C. Project to the AOI CRS (necessary if the source projection is different)
         # Note: 'aoi' must be an sf or sfc object with a CRS for project() to work.
-        r_cropped <- terra::project(r_cropped, sf::st_crs(aoi)$wkt, method = "near",
-                                    res = c(30, 30), # Set a fixed resolution (e.g., 30m Landsat resolution)
-                                    ext = terra::ext(sf::st_bbox(aoi)))
+        template_raster <- terra::rast(
+          extent = terra::ext(sf::st_bbox(aoi)),
+          resolution = 30, # Forced 30m resolution
+          crs = sf::st_crs(aoi)$wkt
+        )
+        r_cropped <- terra::project(r_cropped, template_raster, method = "near")
         
         # D. Save the result.
         names(r_cropped) <- unlist(lapply(names(r_cropped), function(x) paste(stringr::str_split(x, "_")[[1]][8:9], collapse = "_")))
