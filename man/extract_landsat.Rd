@@ -24,7 +24,7 @@ extract_landsat(
 
 \item{site_name}{A character string representing the name of the site.}
 
-\item{aoi_size}{A numeric value representing the size of the AOI in kilometers.}
+\item{aoi_size}{A numeric value representing the size of the AOI in kilometers. Ignored if aoi is a POLYGON.}
 
 \item{start_date}{A character string representing the start date for the imagery.}
 
@@ -39,7 +39,7 @@ extract_landsat(
 \item{base_landsat_dir}{A character string representing the base directory for Landsat imagery.}
 
 \item{workers}{A numeric value representing the number of workers for parallel processing.
-Setting workers > 1 (default) enables parallel computing across multiple nodes.}
+Setting workers > 1 (default) enables parallel computing.}
 
 \item{data_source}{A character string representing the data source (currently only option is "rstac").}
 
@@ -52,55 +52,4 @@ A tibble containing the metadata of the downloaded Landsat scenes.
 This function extracts Landsat imagery that fulfills the specified arguments.
 It processes the area of interest (AOI), transforms coordinates, and downloads
 the relevant Landsat scenes.
-}
-\examples{
-\dontrun{
-# The full workflow
-library(snowman)
-library(terra)
-
-# Set the number of cores
-n_workers <- 4
-
-# Replace with your own path where all data will be downloaded
-base_landsat_path <- "C:/MyTemp/RS/"
-
-site <- "Sierra_nevada" # Name of the AOI
-aoi_point <- list(lon = -3.311665, lat = 37.053188) # center point of AOI
-
-# Download Landsat-8 imagery
-image_df <- extract_landsat(aoi = aoi_point,
-                            site_name = site,
-                            base_landsat_dir = base_landsat_path,
-                            sats = "LC08",
-                            workers = n_workers)
-
-# Calculate other geospatial information for the classifier
-calc_predictors(image_df, site_name = site, base_landsat_dir = base_landsat_path)
-
-# Download pretrained Random forest classifier
-download_model(model_names = "LC08",
-               model_dir = base_landsat_path)
-
-# Run the classification across imagery
-lss <- classify_landsat(image_df, 
-                        site_name = site, 
-                        base_landsat_dir = base_landsat_path, 
-                        model_dir = base_landsat_path, 
-                        workers = n_workers)
-
-# Calculate snow variables over the AOI based on the classified imagery
-snow_vars <- calc_snow_variables(image_df, 
-                                 site_name = site, 
-                                 base_landsat_dir = base_landsat_path, 
-                                 workers = n_workers)
-
-# Plot one of the resulting layers
-plot(snow_vars$scd, col = rev(topo.colors(100)), 
-     main = "Snow cover duration in Sierra Nevada")
-
-# Save the resulting snow maps as GeoTiffs
-writeRaster(snow_vars, paste0(base_landsat_path, "/", site, "/", "snow_variables.tif"), 
-            datatype = "FLT4S")
-}
 }
