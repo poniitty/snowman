@@ -33,245 +33,133 @@ extract_landsat <- function(aoi,
                             data_source = "rstac",
                             force = FALSE) {
   
-  # --- 1. SETUP PARALLEL PLAN ---
-  # We set the plan here. Multisession is safest for packages using C++ (terra/sf).
-  # Using on.exit ensures we reset the user's environment when done.
-  if (workers > 1) {
-    # Check if a plan is already running, if not, set one
-    if (inherits(future::plan(), "sequential")) {
-      oplan <- future::plan(future::multisession, workers = workers)
-      on.exit(future::plan(oplan), add = TRUE)
+  # --- 1. PORTABLE PARALLEL SETUP ---
+  # We only set a plan if workers > 1 AND the current plan is idle (sequential).
+  # This allows workers to persist across multiple rounds in a loop.
+  os_type <- Sys.info()['sysname']
+  
+  if (workers > 1 && inherits(future::plan(), "sequential")) {
+    if (os_type %in% c("Linux", "Darwin")) {
+      future::plan(future::multicore, workers = workers)
+    } else {
+      # Multisession for Windows
+      future::plan(future::multisession, workers = workers)
     }
-  } else {
-    oplan <- future::plan(future::sequential)
-    on.exit(future::plan(oplan), add = TRUE)
   }
   
   # --- 2. INPUT VALIDATION & GEOMETRY FIX ---
   utmall <- utm_zones
   
   suppressWarnings({
-    # Disable strict S2 to prevent "Edge crosses loop" errors
     sf::sf_use_s2(FALSE)
     
     if (inherits(aoi, "sf")) {
-      aoi <- sf::st_make_valid(aoi) # Repair topology
+      aoi <- sf::st_make_valid(aoi) 
       
       if(st_geometry_type(aoi) == "POINT"){
-        aoi_mid <- aoi %>%
-          st_centroid() %>%
-          st_transform(crs = 4326)
+        aoi_mid <- aoi %>% st_centroid() %>% st_transform(crs = 4326)
+      } else if(st_geometry_type(aoi) == "POLYGON"){
+        aoi_mid <- aoi %>% st_centroid() %>% st_transform(crs = 4326)
+        aoi <- aoi %>% st_transform(crs = 4326)
       } else {
-        if(st_geometry_type(aoi) == "POLYGON"){
-          aoi_mid <- aoi %>%
-            st_centroid() %>%
-            st_transform(crs = 4326)
-          aoi <- aoi %>%
-            st_transform(crs = 4326)
-        } else {
-          stop("ERROR: The geometry type of the AOI sf object needs to be either POINT or POLYGON")
-        }
+        stop("ERROR: AOI sf object must be POINT or POLYGON")
       }
     } else if (is.list(aoi)) {
-      aoi_mid <- as_tibble(aoi) %>%
-        mutate(name = site_name) %>%
-        st_as_sf(coords = c("lon", "lat"), crs = 4326)
-      aoi <- as_tibble(aoi) %>%
-        mutate(name = site_name) %>%
-        st_as_sf(coords = c("lon", "lat"), crs = 4326)
+      aoi_mid <- as_tibble(aoi) %>% mutate(name = site_name) %>% st_as_sf(coords = c("lon", "lat"), crs = 4326)
+      aoi <- aoi_mid
     } else {
       stop("ERROR: AOI must be an sf object or a list")
     }
   })
   
-  # WGS84 UTM zones to set the correct projection
+  # Coordinate Reference System logic
   utm <- utmall[aoi_mid,] 
-  if (nrow(utm) == 0) {
-    utm <- utmall[st_nearest_feature(aoi_mid, utmall),]
-  }
+  if (nrow(utm) == 0) utm <- utmall[st_nearest_feature(aoi_mid, utmall),]
   
   lat <- st_coordinates(aoi_mid)[,"Y"]
   utm$ZONE <- ifelse(nchar(utm$ZONE) == 1, paste0("0", utm$ZONE), utm$ZONE)
   epsg <- as.numeric(ifelse(lat > 0, paste0(326, utm$ZONE), paste0(327, utm$ZONE)))
   
-  # From point to polygon
   if (st_geometry_type(aoi) == "POLYGON") {
-    aoi <- aoi %>% st_transform(crs = epsg) %>%
-      mutate(name = site_name)
+    aoi <- aoi %>% st_transform(crs = epsg) %>% mutate(name = site_name)
   } else {
-    aoi <- aoi %>% st_transform(crs = epsg) %>%
-      st_buffer(aoi_size * 1000) %>% st_bbox() %>%
-      st_as_sfc() %>% st_as_sf() %>%
-      mutate(name = site_name)
+    aoi <- aoi %>% st_transform(crs = epsg) %>% st_buffer(aoi_size * 1000) %>% 
+      st_bbox() %>% st_as_sfc() %>% st_as_sf() %>% mutate(name = site_name)
   }
   
-  # Check the size of the AOI
-  if(as.numeric(st_area(aoi)) > 1000e6){
-    stop("ERROR: Your AOI is over 1000km2, which will lead to huge memory usage! Consider processing your AOI in blocks.")
-  }
+  # Guardrail for large AOIs
+  if(as.numeric(st_area(aoi)) > 1000e6) stop("ERROR: AOI > $1000km^2$. Process in blocks.")
   
   # --- 3. DIRECTORY & TERRA SETUP ---
-  area_landsat_dir <- file.path(base_landsat_dir, site_name)
+  area_landsat_dir <- file.path(base_landsat_dir, site_name, "imagery")
   if (!dir.exists(area_landsat_dir)) dir.create(area_landsat_dir, recursive = TRUE)
   
-  area_landsat_dir <- file.path(area_landsat_dir,"imagery")
-  if (!dir.exists(area_landsat_dir)) dir.create(area_landsat_dir)
-  
-  # Configure terra to use a local temp dir to avoid /tmp exhaustion
   my_temp_dir <- file.path(base_landsat_dir, "temp_terra")
   if(!dir.exists(my_temp_dir)) dir.create(my_temp_dir, recursive = TRUE)
   terra::terraOptions(tempdir = my_temp_dir)
   
-  # Clean up temp files on exit
-  on.exit(unlink(list.files(my_temp_dir, full.names = TRUE)), add = TRUE)
-  
-  if(force == TRUE){
-    tifs <- list.files(area_landsat_dir, pattern = "GMT.tif$", full.names = TRUE)
-    unlink(tifs)
-    unlink(file.path(area_landsat_dir, "lss.csv"))
-    unlink(file.path(area_landsat_dir, "lss_final.csv"))
+  if(force){
+    unlink(list.files(area_landsat_dir, pattern = "GMT.tif$", full.names = TRUE))
+    unlink(file.path(area_landsat_dir, c("lss.csv", "lss_final.csv")))
   }
   
-  # List existing files
   tifs <- list.files(area_landsat_dir, pattern = "GMT.tif$")
-  
-  # Robust date extraction
-  if(length(tifs) > 0) {
-    tif_dates <- tibble(
-      satid = unlist(lapply(tifs, function(x) str_split(x, "_")[[1]][1])),
-      date = as.character(ymd(unlist(lapply(tifs, function(x) str_split(x, "_")[[1]][4]))))
-    )
+  tif_dates <- if(length(tifs) > 0) {
+    tibble(satid = sapply(str_split(tifs, "_"), `[`, 1),
+           date = as.character(ymd(sapply(str_split(tifs, "_"), `[`, 4))))
   } else {
-    tif_dates <- tibble(satid = character(), date = character())
+    tibble(satid = NA, date = NA)
   }
   
-  if (nrow(tif_dates) == 0) {
-    tif_dates <- tibble(satid = NA, date = NA)
-  }
-  
-  # --- 4. DATA DOWNLOAD (RSTAC) ---
-  lss <- NULL
+  # --- 4. EXTRACTION & PARALLEL PROCESSING ---
   if (data_source == "rstac") {
-    # Note: We pass 'workers' purely for logic inside, but the plan is already set above
     lss <- extract_landsat_stac(workers = workers, start_date = start_date, end_date = end_date, months = months,
                                 aoi = aoi, site_name = site_name, epsg = epsg, excl_dates = tif_dates,
                                 sats = sats, area_landsat_dir = area_landsat_dir, minclouds = minclouds)
   }
   gc()
   
-  if (is.null(lss)) {
-    lss <- tibble(id = NULL, DATE_ACQUIRED = NULL)
-  } else {
-    lss <- lss %>% mutate(id = as.character(id), DATE_ACQUIRED = as.character(DATE_ACQUIRED))
-  }
+  if (is.null(lss)) return(NULL)
   
+  lss <- lss %>% mutate(id = as.character(id), DATE_ACQUIRED = as.character(DATE_ACQUIRED))
   if (file.exists(file.path(area_landsat_dir, "lss.csv"))) {
-    existing_lss <- read_csv(file.path(area_landsat_dir, "lss.csv"), show_col_types = FALSE) %>% 
+    existing <- read_csv(file.path(area_landsat_dir, "lss.csv"), show_col_types = FALSE) %>%
       mutate(id = as.character(id), DATE_ACQUIRED = as.character(DATE_ACQUIRED))
-    lss <- bind_rows(existing_lss, lss) %>% distinct()
+    lss <- bind_rows(existing, lss) %>% distinct()
   }
   
-  if (nrow(lss) == 0) {
-    print("Zero Landsat scenes found and downloaded!")
-    return(NULL)
-  } else {
-    write_csv(lss, file.path(area_landsat_dir, "lss.csv"))
-    
-    # Refresh file list
-    tifs <- list.files(area_landsat_dir, pattern = "GMT.tif$")
-    lss <- full_join(tibble(file = tifs), lss, by = join_by(file))
-    
-    # Metadata parsing (optimized apply)
-    lss$area <- site_name
-    lss_parts <- str_split(lss$file, "_")
-    lss$collection <- gsub("0", "C", sapply(lss_parts, `[`, 6))
-    lss$tier <- sapply(lss_parts, `[`, 7)
-    lss$satid <- sapply(lss_parts, `[`, 1)
-    lss$path <- as.numeric(substr(sapply(lss_parts, `[`, 3), 1, 3))
-    lss$row <- as.numeric(substr(sapply(lss_parts, `[`, 3), 4, 6))
-    lss$date <- ymd(sapply(lss_parts, `[`, 4))
-    lss$time <- gsub(".tif", "", sapply(lss_parts, `[`, 8))
-    
-    lss <- lss %>% arrange(date)
-    
-    # --- 5. CHECK RASTERS (FUTURE APPLY) ---
-    # future.scheduling is key to solving the file descriptor error.
-    # It groups tasks into chunks automatically.
-    
-    img_remove <- future.apply::future_lapply(
-      lss$file, 
-      check_raster, 
-      image_dir = area_landsat_dir,
-      future.seed = TRUE,
-      future.packages = c("terra"),
-      future.scheduling = 5 # <--- Creates chunks to rest file descriptors
-    ) %>% unlist()
-    
-    gc()
-    
-    if (length(img_remove) > 0) {
-      unlink(file.path(area_landsat_dir, img_remove))
-      
-      # [Retry logic omitted for brevity, but follows same pattern if re-implemented]
-      # For now, we clean and save what we have
-      lss <- lss %>% filter(!file %in% img_remove)
-      write_csv(lss, file.path(area_landsat_dir, "lss.csv"))
-    }
-    
-    tifs <- list.files(area_landsat_dir, pattern = "GMT.tif$")
-    lss <- full_join(tibble(file = tifs), lss, by = join_by(file))
-    # ... (Re-run metadata parsing if strictly necessary, or trust filter)
-    lss <- lss %>% arrange(date) %>% filter(!is.na(file))
-    
-    # Redundant check removed for efficiency, assuming the first check worked.
-    
-    # --- 6. MOSAICKING (Sequential due to I/O intensity) ---
-    lss_d <- lss %>% group_by(date, satid, path) %>% count %>% filter(n > 1) %>% ungroup()
-    if (nrow(lss_d) > 0) {
-      for (ii in seq_len(nrow(lss_d))) {
-        lss_dd <- lss_d %>% slice(ii)
-        lss_dd <- right_join(lss, lss_dd, by = join_by(satid, path, date))
-        
-        rs <- lapply(lss_dd$file, function(x) {
-          r <- rast(file.path(area_landsat_dir, x))
-          r[r == 0] <- NA
-          return(r)
-        })
-        
-        rs <- sprc(rs)
-        rs <- mosaic(rs) %>% round()
-        writeRaster(rs, file.path(area_landsat_dir, lss_dd$file[[1]]),
-                    overwrite = TRUE, datatype = "INT2U")
-        unlink(file.path(area_landsat_dir, lss_dd$file[[2:nrow(lss_dd)]]))
-        lss <- lss %>% filter(!file %in% lss_dd$file[[2:nrow(lss_dd)]])
-      }
-    }
-    
-    # --- 7. CALC COVERAGES (FUTURE APPLY) ---
-    lccs <- future.apply::future_lapply(
-      lss$file, 
-      calc_coverages, 
-      image_dir = area_landsat_dir, 
-      future.seed = TRUE,
-      future.packages = c("terra", "dplyr"),
-      future.scheduling = 5 # <--- Chunking again
-    ) %>% bind_rows()
-    
-    gc()
-    
-    lss <- full_join(lss %>% select(-ends_with("proportion")), lccs, by = "file")
-    
-    img_remove <- lss %>% arrange(desc(fill_proportion)) %>%
-      filter(clear_proportion < 0.1) %>% pull(file)
-    
+  write_csv(lss, file.path(area_landsat_dir, "lss.csv"))
+  
+  # --- 5. CLEANUP & QUALITY CONTROL ---
+  tifs <- list.files(area_landsat_dir, pattern = "GMT.tif$")
+  lss <- full_join(tibble(file = tifs), lss, by = "file") %>% filter(!is.na(file))
+  
+  # Use future_lapply for distributed file checking
+  img_remove <- future.apply::future_lapply(
+    lss$file, check_raster, image_dir = area_landsat_dir,
+    future.seed = TRUE, future.packages = "terra", future.scheduling = 5
+  ) %>% unlist()
+  
+  if (length(img_remove) > 0) {
     unlink(file.path(area_landsat_dir, img_remove))
-    
     lss <- lss %>% filter(!file %in% img_remove)
-    
-    write_csv(lss, file.path(area_landsat_dir, "lss_final.csv"))
-    
-    return(lss)
   }
+  
+  # --- 6. COVERAGE CALCULATION ---
+  lccs <- future.apply::future_lapply(
+    lss$file, calc_coverages, image_dir = area_landsat_dir,
+    future.seed = TRUE, future.packages = c("terra", "dplyr"), future.scheduling = 5
+  ) %>% bind_rows()
+  
+  lss <- full_join(lss %>% select(-ends_with("proportion")), lccs, by = "file")
+  
+  # Final filtering: remove low coverage scenes
+  img_remove_final <- lss %>% filter(clear_proportion < 0.1) %>% pull(file)
+  unlink(file.path(area_landsat_dir, img_remove_final))
+  lss <- lss %>% filter(!file %in% img_remove_final)
+  
+  write_csv(lss, file.path(area_landsat_dir, "lss_final.csv"))
+  return(lss)
 }
 
 # Internal Function to Create a Base URL
@@ -418,129 +306,105 @@ extract_landsat_stac <- function(aoi, epsg, excl_dates, site_name,
   return(idsALL)
 }
 
-# Internal Function to Extract Landsat Imagery from STAC
-# Internal Function to Extract Landsat Imagery from STAC
+#' Internal Function: Parallel Feature Processing with Grid Alignment
 process_features_in_parallel <- function(it_obj, area_landsat_dir, aoi, workers, epsg) {
   
-  item_temp <- it_obj$features[[which(lapply(it_obj$features, function(x) x$properties$`proj:epsg`) %>% unlist == epsg)[[1]]]]
+  # 1. Create a Grid Template from one valid feature to ensure alignment
+  # We pick the first feature that matches the target epsg
+  idx <- which(sapply(it_obj$features, function(x) x$properties$`proj:epsg`) == epsg)
+  if(length(idx) == 0) idx <- 1 else idx <- idx[1]
   
+  item_temp <- it_obj$features[[idx]]
   tmp_url <- make_vsicurl_url(rstac::assets_url(item_temp)[[1]])
   
-  r_template <- terra::crop(terra::rast(tmp_url), aoi %>% sf::st_transform(crs = epsg))
+  # Create numerical template for workers to avoid passing full SpatRaster objects
+  r_temp <- terra::crop(terra::rast(tmp_url), aoi %>% sf::st_transform(crs = epsg))
+  exte_vals <- as.numeric(sf::st_bbox(r_temp))[c(1,3,2,4)]
+  reso_val <- terra::res(r_temp)[1]
   
-  
-  juuh <- future.apply::future_lapply(
+  # 2. Parallel Processing with future_lapply
+  # Note: workers is ignored here because plan is set in extract_landsat
+  future.apply::future_lapply(
     it_obj$features, 
     process_feature, 
     area_landsat_dir = area_landsat_dir, 
     aoi = aoi,
-    exte = as.numeric(sf::st_bbox(r_template))[c(1,3,2,4)],
-    reso = terra::res(r_template)[1],
+    exte = exte_vals,
+    reso = reso_val,
     future.packages = c("sf", "terra", "stringr", "rstac"),
     future.seed = TRUE,
-    future.scheduling = 10 # Chunking to prevent FD exhaustion
+    future.scheduling = 10,
+    future.globals = c("make_vsicurl_url")
   )
-  
-  return(juuh)
 }
 
-
-# ft <- it_obj$features[[3]]
-# Internal Function to Extract Landsat Imagery from STAC
+#' Internal Function: Single Feature Extraction with Retry Logic
 process_feature <- function(ft, area_landsat_dir, aoi, exte, reso) {
   
-  # Helper function (if defined globally, ensure it's in future.globals)
   make_vsicurl_url <- function(base_url) {
-    # Ensure this correctly handles the STAC asset URL
     paste0("/vsicurl", "?pc_url_signing=yes", "&pc_collection=landsat-c2-l2", "&url=", base_url)
   }
   
-  # 1. Generate final output name (nm)
-  nm <- paste0(paste(stringr::str_split(ft$id, "_")[[1]][1:4], collapse = "_"), "_",
+  nm <- paste0(paste(str_split(ft$id, "_")[[1]][1:4], collapse = "_"), "_",
                gsub("-", "", substr(ft$properties$created, 1, 10)), "_",
-               paste(stringr::str_split(ft$id, "_")[[1]][5:6], collapse = "_"), "_",
+               paste(str_split(ft$id, "_")[[1]][5:6], collapse = "_"), "_",
                gsub(":", "", substr(ft$properties$datetime, 12, 19)), "GMT.tif")
   
   output_file <- file.path(area_landsat_dir, nm)
+  if (file.exists(output_file)) return(paste0("EXISTS:", nm))
   
-  if (!file.exists(output_file)) {
-    # 2. Get the list of remote COG URLs
-    full_url <- make_vsicurl_url(rstac::assets_url(ft))
-    
-    max_retries <- 3 # Define how many times to try
-    
-    # --- R E T R Y   L O O P ---
-    for (iii in 1:max_retries) {
-      e <- try({
-        # A. Create a spatRaster pointing to the remote COG
-        
-        ee <- try(r_remote <- terra::rast(full_url), silent = TRUE)
-        
-        if(inherits(ee, "try-error")){
-          # Extract the captured group
-          extracted_url <- gsub("\\n","",str_extract(as.character(ee), "(https://.+?)\\n"))
-          
-          r_remote <- terra::rast(full_url[-which(full_url %in% make_vsicurl_url(extracted_url))])
-          
-        }
-        
-        # B. Crop to the AOI extent (subsetting the remote file)
-        r_cropped <- terra::crop(r_remote, aoi %>% sf::st_transform(sf::st_crs(r_remote)))
-        
-        # C. Project to the AOI CRS (necessary if the source projection is different)
-        # Note: 'aoi' must be an sf or sfc object with a CRS for project() to work.
-        template_raster <- terra::rast(
-          extent = terra::ext(exte),
-          resolution = reso, # Forced 30m resolution
-          crs = sf::st_crs(aoi)$wkt
-        )
-        r_cropped <- terra::project(r_cropped, template_raster, method = "near")
-        
-        # D. Save the result.
-        names(r_cropped) <- unlist(lapply(names(r_cropped), function(x) paste(stringr::str_split(x, "_")[[1]][8:9], collapse = "_")))
-        terra::writeRaster(r_cropped, output_file, datatype = "INT2U", overwrite = TRUE, NAflag = 0)
-        
-      }, silent = TRUE)
+  full_url <- make_vsicurl_url(rstac::assets_url(ft))
+  max_retries <- 3
+  
+  for (iii in 1:max_retries) {
+    e <- try({
+      # Attempt to load bands, handling vsicurl errors by dropping bad bands
+      ee <- try(r_remote <- terra::rast(full_url), silent = TRUE)
       
-      # Check if an error occurred (i.e., if 'e' is a try-error)
-      if (!inherits(e, "try-error")) {
-        # Success, exit the loop and function
-        return(paste0("SUCCESS:", nm))
+      if(inherits(ee, "try-error")){
+        # Regex to find failing URL
+        raw_err <- as.character(ee)
+        extracted_url <- gsub("\\n","", stringr::str_extract(raw_err, "(https://.+?)\\n"))
+        r_remote <- terra::rast(full_url[!full_url %in% make_vsicurl_url(extracted_url)])
       }
       
-      # If it's the last attempt and it still failed, log the final error
-      if (iii == max_retries) {
-        message(paste0("FATAL ERROR for ", nm, ": Failed after ", max_retries, " retries. Last error: ", as.character(e)))
-        return(paste0("ERROR:", nm, ":NetworkFailed"))
-      }
+      # Alignment Step: Use Numeric Template to force exact Grid
+      template <- terra::rast(extent = terra::ext(exte), resolution = reso, crs = sf::st_crs(aoi)$wkt)
       
-      # Wait a moment before retrying (exponential backoff is often best)
-      Sys.sleep(iii * 2) # Wait 2s, then 4s, etc.
+      r_cropped <- terra::crop(r_remote, sf::st_transform(aoi, sf::st_crs(r_remote)))
+      r_final <- terra::project(r_cropped, template, method = "near")
       
-    }
+      # Metadata formatting
+      names(r_final) <- sapply(str_split(names(r_final), "_"), function(x) paste(x[8:9], collapse = "_"))
+      terra::writeRaster(r_final, output_file, datatype = "INT2U", overwrite = TRUE, NAflag = 0)
+    }, silent = TRUE)
     
-    if(inherits(e, "try-error")){
-      return(paste0("ERROR:", nm))
-    } else {
-      return(paste0("SUCCESS:", nm))
-    }
-  } else {
-    return(paste0("EXISTS:", nm)) 
+    if (!inherits(e, "try-error")) return(paste0("SUCCESS:", nm))
+    if (iii == max_retries) return(paste0("ERROR:", nm, " - ", as.character(e)))
+    Sys.sleep(iii * 2) 
+  }
+}
+
+#' Quality Control: Reset Workers
+#' Call this function after your loop rounds are completely finished.
+#' @export
+snowman_cleanup <- function() {
+  if (!inherits(future::plan(), "sequential")) {
+    future::plan(future::sequential)
+    message("Parallel workers shut down and session reset to sequential.")
   }
 }
 
 # Internal Function to check if raster files work properly
-# MEMORY OPTIMIZED: Does not load pixel values
 check_raster <- function(image, image_dir){
-  
   fpath <- file.path(image_dir, image)
   
-  # 1. Check if file opens
+  # 1. Attempt to open header
   r <- try(terra::rast(fpath), silent = TRUE)
   if(inherits(r, "try-error")) return(image)
   
-  # 2. Check header/stats WITHOUT loading all values into RAM
-  # minmax() forces a read of the file stats but is much lighter than values()
+  # 2. Force a read of the min/max values 
+  # This verifies that the actual data blocks/tiles are readable
   chk <- try(terra::minmax(r), silent = TRUE)
   
   if(inherits(chk, "try-error")) {
@@ -551,7 +415,6 @@ check_raster <- function(image, image_dir){
 }
 
 # Internal Function to calculate cloud cover within the rasters
-# MEMORY OPTIMIZED: Avoids intToBits loop on millions of pixels
 calc_coverages <- function(image, image_dir){
   require(terra)
   require(dplyr)
@@ -561,57 +424,48 @@ calc_coverages <- function(image, image_dir){
   res_tibble <- tryCatch({
     rs <- terra::rast(fpath)
     
-    # Identify bands
-    band_names <- names(rs)
-    qa_band_name <- band_names[grepl("_pixel", band_names, ignore.case = TRUE)]
-    # Assuming band 4 is 'red' or 'fill' depending on your stack, 
-    # but based on your code, you use index 4 for fill checks.
+    # Identify QA band
+    qa_band_name <- names(rs)[grepl("_pixel", names(rs), ignore.case = TRUE)]
+    if(length(qa_band_name) == 0) stop("QA band not found")
     
-    # 1. Fill Proportion (Using C++ global stats)
-    # Check if 0 is the nodata value
-    fill_prop <- freq(rs[[4]], value=0)
-    fill_count <- if(nrow(fill_prop) > 0) fill_prop[1, "count"] else 0
-    n_pixels <- ncell(rs)
+    # 1. Fill Proportion (Using C++ internal freq)
+    # We check band 4 (often the first SR band in your stack) for 0 values
+    fill_tab <- terra::freq(rs[[4]], value = 0)
+    fill_count <- if(nrow(fill_tab) > 0) fill_tab[1, "count"] else 0
+    n_pixels <- terra::ncell(rs)
     fill_prop_val <- fill_count / n_pixels
     
     # 2. Cloud Proportion (Optimized Bitwise)
-    # Instead of decoding every pixel, get unique values and decode those
-    qa_vals <- values(rs[[qa_band_name]])
+    qa_vals <- terra::values(rs[[qa_band_name]], mat = FALSE)
     
-    # Filter out fill pixels from QA check if necessary (rs[[4]] != 0)
-    # mask <- values(rs[[4]]) != 0 
-    # qa_vals <- qa_vals[mask]
-    
+    # Extract unique values to minimize bitwise computation
     u_qa <- unique(qa_vals)
     u_qa <- u_qa[!is.na(u_qa)]
     
-    # Function to check bits 9 and 10 (Cloud Confidence)
-    # 00 = No confidence, 01 = Low, 10 = Medium, 11 = High
-    # Usually we mask High Confidence clouds (11)
-    is_cloud_val <- sapply(u_qa, function(x) {
+    # Landsat 8-9 QA_PIXEL bit logic (High Confidence Cloud: Bits 8 & 9 set)
+    # In R intToBits, bit 8 is index 9, bit 9 is index 10.
+    cloud_values <- u_qa[sapply(u_qa, function(x) {
       bits <- intToBits(x)
-      # intToBits returns raw bytes. Bits 9-10 are indices 9,10.
-      # Check if both are 1 (High confidence)
+      # Check high confidence cloud (bits 8 and 9 both 1)
       return(as.integer(bits[9]) == 1 && as.integer(bits[10]) == 1)
-    })
+    })]
     
-    cloud_values <- u_qa[is_cloud_val]
-    
-    # Sum pixels that match cloud values
-    # (Much faster than intToBits on 30 million pixels)
-    cloud_count <- sum(qa_vals %in% cloud_values)
+    # Count pixels that match cloud-flagged values
+    cloud_count <- sum(qa_vals %in% cloud_values, na.rm = TRUE)
     cloud_prop_val <- cloud_count / n_pixels
     
-    # Clean up
+    # Clean up large objects before returning
     rm(qa_vals, rs); gc()
     
-    dplyr::tibble(file = image,
-                  fill_proportion = fill_prop_val,
-                  cloud_proportion = cloud_prop_val,
-                  clear_proportion = 1 - (fill_prop_val + cloud_prop_val))
+    dplyr::tibble(
+      file = image,
+      fill_proportion = fill_prop_val,
+      cloud_proportion = cloud_prop_val,
+      clear_proportion = 1 - (fill_prop_val + cloud_prop_val)
+    )
     
   }, error = function(e) {
-    # Return dummy data on fail so parallel process doesn't die
+    # Return NA so the parallel loop doesn't fail
     return(dplyr::tibble(file = image, 
                          fill_proportion = NA, cloud_proportion = NA, clear_proportion = NA))
   })
