@@ -33,19 +33,47 @@ extract_landsat <- function(aoi,
                             data_source = "rstac",
                             force = FALSE) {
   
-  # --- 1. PORTABLE PARALLEL SETUP ---
-  # We only set a plan if workers > 1 AND the current plan is idle (sequential).
-  # This allows workers to persist across multiple rounds in a loop.
-  os_type <- Sys.info()['sysname']
+  # --- 1. PORTABLE PARALLEL SETUP (Final, Stable Version) ---
+  # Check if running inside RStudio/RStudio Server (where multicore is unstable)
+  # We use parallelly::supportsMulticore() == FALSE on Linux/Darwin to detect RStudio Server.
+  is_rstudio_env <- parallelly::supportsMulticore() == FALSE && Sys.info()['sysname'] %in% c("Linux", "Darwin")
   
-  if (workers > 1 && inherits(future::plan(), "sequential")) {
-    if (os_type %in% c("Linux", "Darwin")) {
-      future::plan(future::multicore, workers = workers)
-    } else {
-      # Multisession for Windows
+  # Determine how many workers are currently running in the active plan.
+  current_plan_workers <- future::nbrOfWorkers()
+  
+  # We only set a new plan if:
+  # 1. The user requested parallelism (workers > 1) AND
+  # 2. No parallel workers are currently active (current_plan_workers <= 1).
+  if (workers > 1 && current_plan_workers <= 1) {
+    
+    # Store the original plan state (which is currently sequential/idle)
+    # We save this so snowman_cleanup() can restore it later.
+    oplan <- future::plan() 
+    
+    os_type <- Sys.info()['sysname']
+    
+    # Decision: Use multisession for stability in RStudio/Windows, multicore for speed elsewhere.
+    if (os_type == "Windows" || is_rstudio_env) {
+      # USE MULTISESSION (SOCKETS): Stable for RStudio Server and required for Windows.
       future::plan(future::multisession, workers = workers)
+      message(paste("Setting parallel plan to 'multisession' (Sockets) with", workers, "workers for cross-platform stability."))
+    } else if (os_type %in% c("Linux", "Darwin")) {
+      # USE MULTICORE (FORKING): Fastest and best for pure Linux terminal/HPC batch environments.
+      future::plan(future::multicore, workers = workers)
+      message(paste("Setting parallel plan to 'multicore' (Forking) with", workers, "workers."))
     }
+    
+    # Note: We rely on the user calling snowman_cleanup() to restore 'oplan'.
+    
+  } else if (workers > 1 && current_plan_workers > 1) {
+    # If a plan is already set with workers, reuse it.
+    message(paste("Reusing existing parallel plan with", current_plan_workers, "workers."))
+  } else {
+    # Default to sequential if workers <= 1.
+    future::plan(future::sequential)
+    # message is optional here, but good for debugging if workers=1.
   }
+  # --- END OF SETUP ---
   
   # --- 2. INPUT VALIDATION & GEOMETRY FIX ---
   utmall <- utm_zones
