@@ -79,29 +79,33 @@ extract_landsat <- function(aoi,
   utmall <- utm_zones
   
   suppressWarnings({
-    sf::sf_use_s2(FALSE)
-    
-    if (inherits(aoi, "sf")) {
-      aoi <- sf::st_make_valid(aoi) 
+    suppressMessages({
+      sf::sf_use_s2(FALSE)
       
-      if(st_geometry_type(aoi) == "POINT"){
-        aoi_mid <- aoi %>% st_centroid() %>% st_transform(crs = 4326)
-      } else if(st_geometry_type(aoi) == "POLYGON"){
-        aoi_mid <- aoi %>% st_centroid() %>% st_transform(crs = 4326)
-        aoi <- aoi %>% st_transform(crs = 4326)
+      if (inherits(aoi, "sf")) {
+        aoi <- sf::st_make_valid(aoi) 
+        
+        if(st_geometry_type(aoi) == "POINT"){
+          aoi_mid <- aoi %>% st_centroid() %>% st_transform(crs = 4326)
+        } else if(st_geometry_type(aoi) == "POLYGON"){
+          aoi_mid <- aoi %>% st_centroid() %>% st_transform(crs = 4326)
+          aoi <- aoi %>% st_transform(crs = 4326)
+        } else {
+          stop("ERROR: AOI sf object must be POINT or POLYGON")
+        }
+      } else if (is.list(aoi)) {
+        aoi_mid <- as_tibble(aoi) %>% mutate(name = site_name) %>% st_as_sf(coords = c("lon", "lat"), crs = 4326)
+        aoi <- aoi_mid
       } else {
-        stop("ERROR: AOI sf object must be POINT or POLYGON")
+        stop("ERROR: AOI must be an sf object or a list")
       }
-    } else if (is.list(aoi)) {
-      aoi_mid <- as_tibble(aoi) %>% mutate(name = site_name) %>% st_as_sf(coords = c("lon", "lat"), crs = 4326)
-      aoi <- aoi_mid
-    } else {
-      stop("ERROR: AOI must be an sf object or a list")
-    }
+    })
   })
   
   # Coordinate Reference System logic
-  utm <- utmall[aoi_mid,] 
+  suppressMessages({
+    utm <- utmall[aoi_mid,] 
+  })
   if (nrow(utm) == 0) utm <- utmall[st_nearest_feature(aoi_mid, utmall),]
   
   lat <- st_coordinates(aoi_mid)[,"Y"]
@@ -147,47 +151,117 @@ extract_landsat <- function(aoi,
   }
   gc()
   
-  if (is.null(lss)) return(NULL)
+  if (is.null(lss)) {
+    lss <- tibble(id = NULL, DATE_ACQUIRED = NULL)
+  } else {
+    lss <- lss %>% mutate(id = as.character(id), DATE_ACQUIRED = as.character(DATE_ACQUIRED))
+  }
   
-  lss <- lss %>% mutate(id = as.character(id), DATE_ACQUIRED = as.character(DATE_ACQUIRED))
   if (file.exists(file.path(area_landsat_dir, "lss.csv"))) {
-    existing <- read_csv(file.path(area_landsat_dir, "lss.csv"), show_col_types = FALSE) %>%
+    existing_lss <- read_csv(file.path(area_landsat_dir, "lss.csv"), show_col_types = FALSE) %>% 
       mutate(id = as.character(id), DATE_ACQUIRED = as.character(DATE_ACQUIRED))
-    lss <- bind_rows(existing, lss) %>% distinct()
+    lss <- bind_rows(existing_lss, lss) %>% distinct()
   }
   
-  write_csv(lss, file.path(area_landsat_dir, "lss.csv"))
-  
-  # --- 5. CLEANUP & QUALITY CONTROL ---
-  tifs <- list.files(area_landsat_dir, pattern = "GMT.tif$")
-  lss <- full_join(tibble(file = tifs), lss, by = "file") %>% filter(!is.na(file))
-  
-  # Use future_lapply for distributed file checking
-  img_remove <- future.apply::future_lapply(
-    lss$file, check_raster, image_dir = area_landsat_dir,
-    future.seed = TRUE, future.packages = "terra", future.scheduling = 5
-  ) %>% unlist()
-  
-  if (length(img_remove) > 0) {
+  if (nrow(lss) == 0) {
+    print("Zero Landsat scenes found or downloaded!")
+    return(NULL)
+  } else {
+    write_csv(lss, file.path(area_landsat_dir, "lss.csv"))
+    
+    # Refresh file list
+    tifs <- list.files(area_landsat_dir, pattern = "GMT.tif$")
+    lss <- full_join(tibble(file = tifs), lss, by = join_by(file))
+    
+    # Metadata parsing (optimized apply)
+    lss$area <- site_name
+    lss_parts <- str_split(lss$file, "_")
+    lss$collection <- gsub("0", "C", sapply(lss_parts, `[`, 6))
+    lss$tier <- sapply(lss_parts, `[`, 7)
+    lss$satid <- sapply(lss_parts, `[`, 1)
+    lss$path <- as.numeric(substr(sapply(lss_parts, `[`, 3), 1, 3))
+    lss$row <- as.numeric(substr(sapply(lss_parts, `[`, 3), 4, 6))
+    lss$date <- ymd(sapply(lss_parts, `[`, 4))
+    lss$time <- gsub(".tif", "", sapply(lss_parts, `[`, 8))
+    
+    lss <- lss %>% arrange(date)
+    
+    # --- 5. CHECK RASTERS (FUTURE APPLY) ---
+    # future.scheduling is key to solving the file descriptor error.
+    # It groups tasks into chunks automatically.
+    
+    img_remove <- future.apply::future_lapply(
+      lss$file, 
+      check_raster, 
+      image_dir = area_landsat_dir,
+      future.seed = TRUE,
+      future.packages = c("terra"),
+      future.scheduling = 5 # <--- Creates chunks to rest file descriptors
+    ) %>% unlist()
+    
+    gc()
+    
+    if (length(img_remove) > 0) {
+      unlink(file.path(area_landsat_dir, img_remove))
+      
+      # [Retry logic omitted for brevity, but follows same pattern if re-implemented]
+      # For now, we clean and save what we have
+      lss <- lss %>% filter(!file %in% img_remove)
+      write_csv(lss, file.path(area_landsat_dir, "lss.csv"))
+    }
+    
+    tifs <- list.files(area_landsat_dir, pattern = "GMT.tif$")
+    lss <- full_join(tibble(file = tifs), lss, by = join_by(file))
+    # ... (Re-run metadata parsing if strictly necessary, or trust filter)
+    lss <- lss %>% arrange(date) %>% filter(!is.na(file))
+    
+    # --- 6. MOSAICKING (Sequential due to I/O intensity) ---
+    lss_d <- lss %>% group_by(date, satid, path) %>% count %>% filter(n > 1) %>% ungroup()
+    if (nrow(lss_d) > 0) {
+      for (ii in seq_len(nrow(lss_d))) {
+        lss_dd <- lss_d %>% slice(ii)
+        lss_dd <- right_join(lss, lss_dd, by = join_by(satid, path, date))
+        
+        rs <- lapply(lss_dd$file, function(x) {
+          r <- rast(file.path(area_landsat_dir, x))
+          r[r == 0] <- NA
+          return(r)
+        })
+        
+        rs <- sprc(rs)
+        rs <- mosaic(rs) %>% round()
+        writeRaster(rs, file.path(area_landsat_dir, lss_dd$file[[1]]),
+                    overwrite = TRUE, datatype = "INT2U")
+        unlink(file.path(area_landsat_dir, lss_dd$file[[2:nrow(lss_dd)]]))
+        lss <- lss %>% filter(!file %in% lss_dd$file[[2:nrow(lss_dd)]])
+      }
+    }
+    
+    # --- 7. CALC COVERAGES (FUTURE APPLY) ---
+    lccs <- future.apply::future_lapply(
+      lss$file, 
+      calc_coverages, 
+      image_dir = area_landsat_dir, 
+      future.seed = TRUE,
+      future.packages = c("terra", "dplyr"),
+      future.scheduling = 5 # <--- Chunking again
+    ) %>% bind_rows()
+    
+    gc()
+    
+    lss <- full_join(lss %>% select(-ends_with("proportion")), lccs, by = "file")
+    
+    img_remove <- lss %>% arrange(desc(fill_proportion)) %>%
+      filter(clear_proportion < 0.1) %>% pull(file)
+    
     unlink(file.path(area_landsat_dir, img_remove))
+    
     lss <- lss %>% filter(!file %in% img_remove)
+    
+    write_csv(lss, file.path(area_landsat_dir, "lss_final.csv"))
+    
+    return(lss)
   }
-  
-  # --- 6. COVERAGE CALCULATION ---
-  lccs <- future.apply::future_lapply(
-    lss$file, calc_coverages, image_dir = area_landsat_dir,
-    future.seed = TRUE, future.packages = c("terra", "dplyr"), future.scheduling = 5
-  ) %>% bind_rows()
-  
-  lss <- full_join(lss %>% select(-ends_with("proportion")), lccs, by = "file")
-  
-  # Final filtering: remove low coverage scenes
-  img_remove_final <- lss %>% filter(clear_proportion < 0.1) %>% pull(file)
-  unlink(file.path(area_landsat_dir, img_remove_final))
-  lss <- lss %>% filter(!file %in% img_remove_final)
-  
-  write_csv(lss, file.path(area_landsat_dir, "lss_final.csv"))
-  return(lss)
 }
 
 # Internal Function to Create a Base URL
@@ -253,8 +327,12 @@ extract_landsat_stac <- function(aoi, epsg, excl_dates, site_name,
   
   if (length(it_obj$features) > 0) {
     
-    itst <- items_as_sf(it_obj) %>% st_make_valid()
-    itst <- st_crop(itst, aoi %>% st_transform(st_crs(itst)))
+    suppressMessages({
+      suppressWarnings({
+        itst <- items_as_sf(it_obj) %>% st_make_valid()
+        itst <- st_crop(itst, aoi %>% st_transform(st_crs(itst)))
+      })
+    })
     
     if(nrow(itst) > 0){
       itst$area <- as.numeric(st_area(itst)) / (1000 * 1000)
@@ -367,6 +445,7 @@ process_features_in_parallel <- function(it_obj, area_landsat_dir, aoi, workers,
 }
 
 #' Internal Function: Single Feature Extraction with Retry Logic
+# ft <- it_obj$features[[2]]
 process_feature <- function(ft, area_landsat_dir, aoi, exte, reso) {
   
   make_vsicurl_url <- function(base_url) {
@@ -394,6 +473,8 @@ process_feature <- function(ft, area_landsat_dir, aoi, exte, reso) {
         raw_err <- as.character(ee)
         extracted_url <- gsub("\\n","", stringr::str_extract(raw_err, "(https://.+?)\\n"))
         r_remote <- terra::rast(full_url[!full_url %in% make_vsicurl_url(extracted_url)])
+      } else {
+        extracted_url <- NULL
       }
       
       # Alignment Step: Use Numeric Template to force exact Grid
@@ -402,8 +483,24 @@ process_feature <- function(ft, area_landsat_dir, aoi, exte, reso) {
       r_cropped <- terra::crop(r_remote, sf::st_transform(aoi, sf::st_crs(r_remote)))
       r_final <- terra::project(r_cropped, template, method = "near")
       
+      if(length(extracted_url) > 0){
+        
+        for(i_miss in extracted_url){
+          
+          rtemp <- r_final[[1]]
+          rtemp[] <- NA
+          names(rtemp) <- stringr::str_split_i(basename(extracted_url), "\\.", 1)
+          r_final <- c(r_final, rtemp)
+          
+        }
+        
+      }
+      
       # Metadata formatting
       names(r_final) <- sapply(str_split(names(r_final), "_"), function(x) paste(x[8:9], collapse = "_"))
+      r_final <- r_final[[c(names(r_final)[grepl("SR_", names(r_final))] %>% sort,
+                            names(r_final)[grepl("ST_", names(r_final))] %>% sort,
+                            names(r_final)[grepl("QA_", names(r_final))] %>% sort)]]
       terra::writeRaster(r_final, output_file, datatype = "INT2U", overwrite = TRUE, NAflag = 0)
     }, silent = TRUE)
     

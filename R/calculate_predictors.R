@@ -69,16 +69,16 @@ calc_predictors <- function(image_df, site_name, base_landsat_dir, data_source =
   }
   
   # Read the first raster file to get the EPSG code
-  r <- rast(paste0(base_landsat_dir, "/", site_name, "/imagery/", image_df$file[1]))
-  epsg <- st_crs(r)$epsg
+  r <- terra::rast(paste0(base_landsat_dir, "/", site_name, "/imagery/", image_df$file[1]))
+  epsg <- sf::st_crs(r)$epsg
   
   # Create an area of interest (AOI) buffer
-  aoi <- st_bbox(r) %>%
-    st_as_sfc() %>%
-    st_buffer(1000) %>%
-    st_bbox() %>%
-    st_as_sfc() %>%
-    st_as_sf()
+  aoi <- sf::st_bbox(r) %>%
+    sf::st_as_sfc() %>%
+    sf::st_buffer(1000) %>%
+    sf::st_bbox() %>%
+    sf::st_as_sfc() %>%
+    sf::st_as_sf()
   
   if (data_source == "rstac") {
     # ALOS DEM from STAC
@@ -191,12 +191,12 @@ calc_predictors <- function(image_df, site_name, base_landsat_dir, data_source =
   }
   
   # DEM Variables
-  dem <- rast(paste0(predictor_dir, "/ALOSDEM.tif"))
+  dem <- terra::rast(paste0(predictor_dir, "/ALOSDEM.tif"))
   
   # SLOPE
-  slp <- terrain(dem, "slope", unit = "degrees")
+  slp <- terra::terrain(dem, "slope", unit = "degrees")
   names(slp) <- "slope"
-  writeRaster(round(slp * 100), paste0(predictor_dir, "/slope.tif"),
+  terra::writeRaster(round(slp * 100), paste0(predictor_dir, "/slope.tif"),
               filetype = "GTiff", overwrite = TRUE, datatype = "INT2U")
   
   # Median Landsat Images
@@ -225,6 +225,7 @@ calc_predictors <- function(image_df, site_name, base_landsat_dir, data_source =
       }
       
       rr <- lapply(imagedf3$file, function(x) {
+        
         sat_id <- imagedf3 %>% filter(file == x) %>% pull(satid)
         r1 <- rast(paste0(base_landsat_dir, "/", site_name, "/imagery/", x))
         

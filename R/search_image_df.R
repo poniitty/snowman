@@ -65,6 +65,13 @@ search_image_df <- function(site_name, base_landsat_dir, workers = 1){
   
   tifs <- list.files(area_landsat_dir, pattern = "GMT.tif$")
   
+  if(file.exists(file.path(area_landsat_dir, "lss_final.csv"))){
+    lss <- readr::read_csv(file.path(area_landsat_dir, "lss_final.csv"), show_col_types = FALSE)
+    if(nrow(lss) == length(tifs)){
+      return(lss)
+    }
+  }
+  
   lss <- tibble(area = site_name,
                 file = tifs)
   lss$collection <- gsub("0","C",unlist(lapply(lss$file, function(x) str_split(x, "_")[[1]][6])))

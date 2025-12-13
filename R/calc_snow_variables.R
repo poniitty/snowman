@@ -193,7 +193,7 @@ calc_snow_variables <- function(image_df, site_name, base_landsat_dir, workers =
       
       results <- parLapply(cl, mm %>%
                           mutate(cell2 = cell) %>%
-                          nest(data = -cell2) %>%
+                          tidyr::nest(data = -cell2) %>%
                           pull(data),
                         cal_scd, extradf = extradf)
     } else {
@@ -234,6 +234,7 @@ calc_snow_variables <- function(image_df, site_name, base_landsat_dir, workers =
     
   } else {
     print("Less than 50 individual images! Snow variables not calculated.")
+    rs <- NULL
   }
   
   return(rs)
