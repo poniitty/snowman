@@ -89,31 +89,47 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir, w
     mod8 <- NULL
   }
   
-  # Read the first raster file to get the CRS and extent
-  r <- terra::rast(paste0(base_landsat_dir, "/", site_name, "/imagery/", image_df$file[1]), 1)
+  # --- 1. PORTABLE PARALLEL SETUP (Final, Stable Version) ---
+  # Check if running inside RStudio/RStudio Server (where multicore is unstable)
+  # We use parallelly::supportsMulticore() == FALSE on Linux/Darwin to detect RStudio Server.
+  is_rstudio_env <- parallelly::supportsMulticore() == FALSE && Sys.info()['sysname'] %in% c("Linux", "Darwin")
   
-  # Read and project the slope raster
-  slope <- terra::rast(paste0(predictor_dir, "/slope.tif")) / 100
-  slope <- terra::project(slope, r)
+  # Determine how many workers are currently running in the active plan.
+  current_plan_workers <- future::nbrOfWorkers()
   
-  # Read, aggregate, and project the ESALC raster
-  esalc <- terra::rast(paste0(predictor_dir, "/ESALC.tif")) / 10
-  esalc <- terra::aggregate(esalc, 3, getmode)
-  esalc <- terra::project(esalc, r, method = "near")
-  
-  # Read, modify, aggregate, and project the ESAW raster
-  esaw <- terra::rast(paste0(predictor_dir, "/ESALC.tif"))
-  esaw[esaw == 80] <- 1
-  esaw[esaw != 1] <- 0
-  esaw <- terra::aggregate(esaw, 3, mean)
-  esaw <- terra::project(esaw, r)
-  
-  # Mask slope raster where ESAW raster is greater than 0.2
-  slope[esaw > 0.2] <- 0
-  
-  # Read and project the DEM raster
-  dem <- terra::rast(paste0(predictor_dir, "/ALOSDEM.tif"))
-  dem <- terra::project(dem, r)
+  # We only set a new plan if:
+  # 1. The user requested parallelism (workers > 1) AND
+  # 2. No parallel workers are currently active (current_plan_workers <= 1).
+  if (workers > 1 && current_plan_workers <= 1) {
+    
+    # Store the original plan state (which is currently sequential/idle)
+    # We save this so snowman_cleanup() can restore it later.
+    oplan <- future::plan() 
+    
+    os_type <- Sys.info()['sysname']
+    
+    # Decision: Use multisession for stability in RStudio/Windows, multicore for speed elsewhere.
+    if (os_type == "Windows" || is_rstudio_env) {
+      # USE MULTISESSION (SOCKETS): Stable for RStudio Server and required for Windows.
+      future::plan(future::multisession, workers = workers)
+      message(paste("Setting parallel plan to 'multisession' (Sockets) with", workers, "workers for cross-platform stability."))
+    } else if (os_type %in% c("Linux", "Darwin")) {
+      # USE MULTICORE (FORKING): Fastest and best for pure Linux terminal/HPC batch environments.
+      future::plan(future::multicore, workers = workers)
+      message(paste("Setting parallel plan to 'multicore' (Forking) with", workers, "workers."))
+    }
+    
+    # Note: We rely on the user calling snowman_cleanup() to restore 'oplan'.
+    
+  } else if (workers > 1 && current_plan_workers > 1) {
+    # If a plan is already set with workers, reuse it.
+    message(paste("Reusing existing parallel plan with", current_plan_workers, "workers."))
+  } else {
+    # Default to sequential if workers <= 1.
+    future::plan(future::sequential)
+    # message is optional here, but good for debugging if workers=1.
+  }
+  # --- END OF SETUP ---
   
   # Apply the classifying function to each image file in parallel
   suppressWarnings(suppressMessages(
@@ -123,10 +139,27 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir, w
                   mod7 = mod7, mod5 = mod5, mod8 = mod8,
                   base_landsat_dir = base_landsat_dir,
                   predictor_dir = predictor_dir,
-                  class_landsat_dir = class_landsat_dir,
-                  slope = slope, esalc = esalc, esaw = esaw,
-                  dem = dem)
+                  class_landsat_dir = class_landsat_dir)
   ))
+  
+  lss <- future.apply::future_lapply(image_df$file, function(f) {
+    classifying_function(
+      imageid = f, 
+      image_df = image_df,
+      predictor_dir = predictor_dir, 
+      class_landsat_dir = class_landsat_dir, 
+      base_landsat_dir = base_landsat_dir, 
+      site_name = site_name, 
+      force = force,
+      mod7 = mod7, mod5 = mod5, mod8 = mod8
+    )},
+    future.packages = c("dplyr", "sf", "terra", "lubridate",
+                        "solartime", "randomForestSRC"),
+    future.seed = TRUE,
+    future.scheduling = 10
+  )
+  
+  snowman_cleanup()
   
   return(unlist(lss))
 }
@@ -134,7 +167,7 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir, w
 # Internal Function to Classify a Single Landsat Image
 classifying_function <- function(imageid, image_df, predictor_dir, class_landsat_dir,
                                  base_landsat_dir, site_name, force = FALSE,
-                                 mod8, mod7, mod5, slope, esalc, esaw, dem) {
+                                 mod8, mod7, mod5) {
   # imageid <- image_df$file[[1]]
   # Check if the classified raster already exists
   if (!file.exists(paste0(class_landsat_dir, "/", imageid)) | force == TRUE) {
@@ -166,15 +199,18 @@ classifying_function <- function(imageid, image_df, predictor_dir, class_landsat
     # Mask pixels with QA value of 0
     r[r[["QA"]] == 0] <- NA
     
+    # Read and project the DEM raster
+    dem <- terra::rast(paste0(predictor_dir, "/ALOSDEM.tif"))
+    
     # Add predictor rasters to the raster stack if they are used in the model
     if ("esalc" %in% mod_vars) {
-      r[["esalc"]] <- esalc
+      r[["esalc"]] <- terra::rast(paste0(predictor_dir, "/ESALC.tif"))
     }
     if ("esaw" %in% mod_vars) {
-      r[["esaw"]] <- esaw
+      r[["esaw"]] <- terra::rast(paste0(predictor_dir, "/ESAW.tif"))
     }
     if ("slope" %in% mod_vars) {
-      r[["slope"]] <- slope
+      r[["slope"]] <- terra::rast(paste0(predictor_dir, "/slope.tif")) / 100
     }
     
     # Check if the number of non-NA pixels is greater than 100
@@ -192,6 +228,7 @@ classifying_function <- function(imageid, image_df, predictor_dir, class_landsat
         hill <- shade(terra::terrain(dem, "slope", unit = "radians"),
                       terra::terrain(dem, "aspect", unit = "radians"),
                       (sa[3] * (180 / pi)), (sa[4] * (180 / pi)))
+        esaw <- terra::rast(paste0(predictor_dir, "/ESAW.tif"))
         hill[esaw > 0.2] <- median(terra::values(hill, mat = FALSE), na.rm = TRUE)
         
         if (sum(is.na(terra::values(hill, mat = FALSE))) > 0) {
@@ -402,7 +439,7 @@ classifying_function <- function(imageid, image_df, predictor_dir, class_landsat
         }
         # d %>% select(-RADSAT) %>% filter(!complete.cases(.))
         rm(d)
-        
+        # ¨71§ 
         if(nrow(preds) == length(na.omit(values(r[["QA"]], mat = F)))){
           rr <- r[["QA"]]
           rr[["class"]] <- 0
@@ -432,8 +469,8 @@ classifying_function <- function(imageid, image_df, predictor_dir, class_landsat
         
         return(imageid)
       }
-    }
-  }
+    } else { return(NULL) }
+  } else { return(NULL) }
 }
 
 # Internal helper function to calculate a mode

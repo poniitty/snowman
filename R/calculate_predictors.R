@@ -75,7 +75,7 @@ calc_predictors <- function(image_df, site_name, base_landsat_dir, data_source =
   # Create an area of interest (AOI) buffer
   aoi <- sf::st_bbox(r) %>%
     sf::st_as_sfc() %>%
-    sf::st_buffer(1000) %>%
+    sf::st_buffer(100) %>%
     sf::st_bbox() %>%
     sf::st_as_sfc() %>%
     sf::st_as_sf()
@@ -126,9 +126,6 @@ calc_predictors <- function(image_df, site_name, base_landsat_dir, data_source =
     dem <- mosaic(dem)
     dem[dem < 0] <- 0
     dem[is.na(dem)] <- 0
-    
-    writeRaster(dem, paste0(predictor_dir, "/ALOSDEM.tif"), overwrite = TRUE)
-    unlink(list.files(predictor_dir, pattern = "_DSM.tif", full.names = TRUE))
     
     # ESA WorldCover from STAC
     it_obj <- s_obj %>%
@@ -181,23 +178,45 @@ calc_predictors <- function(image_df, site_name, base_landsat_dir, data_source =
     esa[esa < 0] <- 0
     esa[is.na(esa)] <- 0
     
+    esaw <- esa
+    esaw[esaw == 80] <- 1
+    esaw[esaw != 1] <- 0
+    esaw <- terra::aggregate(esaw, 3, mean)
+    esaw <- round(terra::project(esaw, r),3)
+    
+    suppressMessages({
+      suppressWarnings({
+        writeRaster(esaw, paste0(predictor_dir, "/ESAW.tif"), overwrite = TRUE)
+      })
+    })
+    
+    
+    esa <- terra::aggregate(esa, 3, getmode)
+    esa <- terra::project(esa, r, method = "near")
+    
     suppressMessages({
       suppressWarnings({
         writeRaster(esa, paste0(predictor_dir, "/ESALC.tif"), overwrite = TRUE, datatype = "INT1U")
       })
     })
+    
+    # SLOPE
+    slp <- terra::terrain(dem, "slope", unit = "degrees")
+    slp <- terra::project(slp, r)
+    slp[esaw > 0.2] <- 0
+    names(slp) <- "slope"
+    terra::writeRaster(round(slp * 100), paste0(predictor_dir, "/slope.tif"),
+                       filetype = "GTiff", overwrite = TRUE, datatype = "INT2U")
+    
+    dem <- terra::project(dem, r)
+    
+    writeRaster(dem, paste0(predictor_dir, "/ALOSDEM.tif"), overwrite = TRUE)
+    
+    unlink(list.files(predictor_dir, pattern = "_DSM.tif", full.names = TRUE))
     unlink(list.files(predictor_dir, pattern = "_Map.tif", full.names = TRUE))
     
   }
   
-  # DEM Variables
-  dem <- terra::rast(paste0(predictor_dir, "/ALOSDEM.tif"))
-  
-  # SLOPE
-  slp <- terra::terrain(dem, "slope", unit = "degrees")
-  names(slp) <- "slope"
-  terra::writeRaster(round(slp * 100), paste0(predictor_dir, "/slope.tif"),
-              filetype = "GTiff", overwrite = TRUE, datatype = "INT2U")
   
   # Median Landsat Images
   if (nrow(image_df) > 0) {
@@ -268,12 +287,14 @@ calc_predictors <- function(image_df, site_name, base_landsat_dir, data_source =
     r2 <- rast(paste0(predictor_dir, "/medianlandsat_",
                       unique(imagedf2$month) %>% sort(), ".tif"))
     
-    all <- rast()
-    for (ilayer in unique(names(r2))) {
-      r3 <- r2[[which(names(r2) == ilayer)]]
-      r4 <- approximate(r3, rule = 2, NArule = 2)
-      all <- c(all, r4)
-    }
+    suppressWarnings({
+      all <- rast()
+      for (ilayer in unique(names(r2))) {
+        r3 <- r2[[which(names(r2) == ilayer)]]
+        r4 <- approximate(r3, rule = 2, NArule = 2)
+        all <- c(all, r4)
+      }
+    })
     
     nmo <- unique(imagedf2$month) %>% sort() %>% length()
     for (mo in unique(imagedf2$month) %>% sort()) {
