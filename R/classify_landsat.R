@@ -132,16 +132,6 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir, w
   # --- END OF SETUP ---
   
   # Apply the classifying function to each image file in parallel
-  suppressWarnings(suppressMessages(
-    lss <- lapply(image_df$file, classifying_function,
-                  image_df = image_df, site_name = site_name,
-                  force = force,
-                  mod7 = mod7, mod5 = mod5, mod8 = mod8,
-                  base_landsat_dir = base_landsat_dir,
-                  predictor_dir = predictor_dir,
-                  class_landsat_dir = class_landsat_dir)
-  ))
-  
   lss <- future.apply::future_lapply(image_df$file, function(f) {
     classifying_function(
       imageid = f, 
