@@ -72,6 +72,19 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir, w
     dir.create(class_landsat_dir)
   }
   
+  tifs <- list.files(class_landsat_dir, pattern = ".tif$")
+  
+  if(!force){
+    image_df <- image_df %>% 
+      dplyr::filter(!file %in% tifs)
+  }
+  
+  if(nrow(image_df) == 0 & !force){
+    message("All imagery classified previously!")
+    return(NULL)
+  }
+  
+  
   # Load pretrained models
   if(any(c("LT05","LT04") %in% unique(image_df$satid))){
     mod5 <- readRDS(paste0(model_dir, "latest_TM05.rds"))
@@ -87,6 +100,26 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir, w
     mod8 <- readRDS(paste0(model_dir, "latest_LC08.rds"))
   } else {
     mod8 <- NULL
+  }
+  
+  if(nrow(image_df) <= 10){
+    message(paste0("Only ", nrow(image_df), " images to classify. Forced to sequential job!"))
+    
+    lss <- lapply(image_df$file, function(f) {
+      classifying_function(
+        imageid = f, 
+        image_df = image_df,
+        predictor_dir = predictor_dir, 
+        class_landsat_dir = class_landsat_dir, 
+        base_landsat_dir = base_landsat_dir, 
+        site_name = site_name, 
+        force = force,
+        mod7 = mod7, mod5 = mod5, mod8 = mod8
+      )}
+    )
+    
+    return(unlist(lss))
+    
   }
   
   # --- 1. PORTABLE PARALLEL SETUP (Final, Stable Version) ---
