@@ -73,7 +73,7 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir, w
   }
   
   # Load pretrained models
-  if(any(c("TM05","TM04") %in% unique(image_df$satid))){
+  if(any(c("LT05","LT04") %in% unique(image_df$satid))){
     mod5 <- readRDS(paste0(model_dir, "latest_TM05.rds"))
   } else {
     mod5 <- NULL
@@ -90,30 +90,30 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir, w
   }
   
   # Read the first raster file to get the CRS and extent
-  r <- rast(paste0(base_landsat_dir, "/", site_name, "/imagery/", image_df$file[1]), 1)
+  r <- terra::rast(paste0(base_landsat_dir, "/", site_name, "/imagery/", image_df$file[1]), 1)
   
   # Read and project the slope raster
-  slope <- rast(paste0(predictor_dir, "/slope.tif")) / 100
-  slope <- project(slope, r)
+  slope <- terra::rast(paste0(predictor_dir, "/slope.tif")) / 100
+  slope <- terra::project(slope, r)
   
   # Read, aggregate, and project the ESALC raster
-  esalc <- rast(paste0(predictor_dir, "/ESALC.tif")) / 10
-  esalc <- aggregate(esalc, 3, getmode)
-  esalc <- project(esalc, r, method = "near")
+  esalc <- terra::rast(paste0(predictor_dir, "/ESALC.tif")) / 10
+  esalc <- terra::aggregate(esalc, 3, getmode)
+  esalc <- terra::project(esalc, r, method = "near")
   
   # Read, modify, aggregate, and project the ESAW raster
-  esaw <- rast(paste0(predictor_dir, "/ESALC.tif"))
+  esaw <- terra::rast(paste0(predictor_dir, "/ESALC.tif"))
   esaw[esaw == 80] <- 1
   esaw[esaw != 1] <- 0
-  esaw <- aggregate(esaw, 3, mean)
-  esaw <- project(esaw, r)
+  esaw <- terra::aggregate(esaw, 3, mean)
+  esaw <- terra::project(esaw, r)
   
   # Mask slope raster where ESAW raster is greater than 0.2
   slope[esaw > 0.2] <- 0
   
   # Read and project the DEM raster
-  dem <- rast(paste0(predictor_dir, "/ALOSDEM.tif"))
-  dem <- project(dem, r)
+  dem <- terra::rast(paste0(predictor_dir, "/ALOSDEM.tif"))
+  dem <- terra::project(dem, r)
   
   # Apply the classifying function to each image file in parallel
   suppressWarnings(suppressMessages(
@@ -139,7 +139,7 @@ classifying_function <- function(imageid, image_df, predictor_dir, class_landsat
   # Check if the classified raster already exists
   if (!file.exists(paste0(class_landsat_dir, "/", imageid)) | force == TRUE) {
     # Get the satellite ID from the image metadata
-    satid <- image_df %>% filter(file == imageid) %>% pull(satid)
+    satid <- image_df %>% dplyr::filter(file == imageid) %>% dplyr::pull(satid)
     
     # Select the appropriate model variables based on the satellite ID
     if (satid %in% c("LT05", "LT04")) {
@@ -151,7 +151,7 @@ classifying_function <- function(imageid, image_df, predictor_dir, class_landsat
     }
     
     # Read the Landsat image raster
-    r <- rast(paste0(base_landsat_dir, "/", site_name, "/imagery/", imageid))
+    r <- terra::rast(paste0(base_landsat_dir, "/", site_name, "/imagery/", imageid))
     
     # Set the band names for Landsat 8 and 9 imagery
     if (satid %in% c("LC08", "LC09")) {
@@ -178,7 +178,7 @@ classifying_function <- function(imageid, image_df, predictor_dir, class_landsat
     }
     
     # Check if the number of non-NA pixels is greater than 100
-    if (sum(!is.na(values(r[[1]]))) > 100) {
+    if (sum(!is.na(terra::values(r[[1]]))) > 100) {
       # Calculate hillshade if it is used in the model
       if ("hillshade" %in% mod_vars) {
         lat <- st_coordinates(st_transform(st_centroid(st_as_sf(st_as_sfc(st_bbox(dem)))), 4326))[1, "Y"]
@@ -187,17 +187,17 @@ classifying_function <- function(imageid, image_df, predictor_dir, class_landsat
                               str_split(gsub(".tif", "", imageid), "_")[[1]][8]))
         
         sa <- computeSunPositionDoyHour(doy = yday(time), hour = hour(time)+(minute(time)/60), 
-                                  latDeg = lat, longDeg = lon, timeZone = 0L)
+                                        latDeg = lat, longDeg = lon, timeZone = 0L)
         
-        hill <- shade(terrain(dem, "slope", unit = "radians"),
-                      terrain(dem, "aspect", unit = "radians"),
+        hill <- shade(terra::terrain(dem, "slope", unit = "radians"),
+                      terra::terrain(dem, "aspect", unit = "radians"),
                       (sa[3] * (180 / pi)), (sa[4] * (180 / pi)))
-        hill[esaw > 0.2] <- median(values(hill, mat = FALSE), na.rm = TRUE)
+        hill[esaw > 0.2] <- median(terra::values(hill, mat = FALSE), na.rm = TRUE)
         
-        if (sum(is.na(values(hill, mat = FALSE))) > 0) {
+        if (sum(is.na(terra::values(hill, mat = FALSE))) > 0) {
           repeat {
-            hill <- focal(hill, 5, "mean", na.policy = "only", na.rm = TRUE)
-            if (sum(is.na(values(hill, mat = FALSE))) == 0) {
+            hill <- terra::focal(hill, 5, "mean", na.policy = "only", na.rm = TRUE)
+            if (sum(is.na(terra::values(hill, mat = FALSE))) == 0) {
               break
             }
           }
@@ -207,123 +207,123 @@ classifying_function <- function(imageid, image_df, predictor_dir, class_landsat
       }
       
       # Calculate median Landsat differences if they are used in the model
-      idate <- as.character(ymd(str_split(imageid, "_")[[1]][4]))
-      mo <- month(idate)
+      idate <- as.character(lubridate::ymd(stringr::str_split(imageid, "_")[[1]][4]))
+      mo <- lubridate::month(idate)
       e <- try({
-        mr <- rast(paste0(predictor_dir, "/medianlandsat_", mo, ".tif"))
+        mr <- terra::rast(paste0(predictor_dir, "/medianlandsat_", mo, ".tif"))
       })
       if (class(e) == "try-error") {
         e <- try({
-          mr <- rast(paste0(predictor_dir, "/medianlandsat_", mo + 1, ".tif"))
+          mr <- terra::rast(paste0(predictor_dir, "/medianlandsat_", mo + 1, ".tif"))
         })
       }
       if (class(e) == "try-error") {
         e <- try({
-          mr <- rast(paste0(predictor_dir, "/medianlandsat_", mo - 1, ".tif"))
+          mr <- terra::rast(paste0(predictor_dir, "/medianlandsat_", mo - 1, ".tif"))
         })
       }
       
       mr_diff <- mr - r[[1:7]]
       names(mr_diff) <- paste0("mr_diff_", names(mr_diff))
       if (any(grepl("mr_diff_B5_std5", mod_vars))) {
-        mr_diff[["mr_diff_B5_std5"]] <- focal(r[["B5"]], w = 5, fun = "sd") - focal(mr[["B5"]], w = 5, fun = "sd")
+        mr_diff[["mr_diff_B5_std5"]] <- terra::focal(r[["B5"]], w = 5, fun = "sd") - terra::focal(mr[["B5"]], w = 5, fun = "sd")
       }
       if (any(grepl("mr_diff_B7_std5", mod_vars))) {
-        mr_diff[["mr_diff_B7_std5"]] <- focal(r[["B7"]], w = 5, fun = "sd") - focal(mr[["B7"]], w = 5, fun = "sd")
+        mr_diff[["mr_diff_B7_std5"]] <- terra::focal(r[["B7"]], w = 5, fun = "sd") - terra::focal(mr[["B7"]], w = 5, fun = "sd")
       }
       
       # Calculate median indices if they are used in the model
-      mi <- rast(paste0(predictor_dir, "/medianindices.tif"))
+      mi <- terra::rast(paste0(predictor_dir, "/medianindices.tif"))
       
       # Calculate focal statistics if they are used in the model
       filter <- matrix(1, nrow = 5, ncol = 5)
       filter[ceiling(length(filter) / 2)] <- 0
       
       if (any(grepl("B2_tpi", mod_vars))) {
-        r[["B2_tpi"]] <- r[["B2"]] - focal(r[["B2"]], w = filter, fun = mean,
-                                           na.policy = "omit", na.rm = TRUE)
+        r[["B2_tpi"]] <- r[["B2"]] - terra::focal(r[["B2"]], w = filter, fun = mean,
+                                                  na.policy = "omit", na.rm = TRUE)
       }
       if (any(grepl("B5_tpi", mod_vars))) {
-        r[["B5_tpi"]] <- r[["B5"]] - focal(r[["B5"]], w = filter, fun = mean,
-                                           na.policy = "omit", na.rm = TRUE)
+        r[["B5_tpi"]] <- r[["B5"]] - terra::focal(r[["B5"]], w = filter, fun = mean,
+                                                  na.policy = "omit", na.rm = TRUE)
       }
       if (any(grepl("B7_tpi", mod_vars))) {
-        r[["B7_tpi"]] <- r[["B7"]] - focal(r[["B7"]], w = filter, fun = mean,
-                                           na.policy = "omit", na.rm = TRUE)
+        r[["B7_tpi"]] <- r[["B7"]] - terra::focal(r[["B7"]], w = filter, fun = mean,
+                                                  na.policy = "omit", na.rm = TRUE)
       }
       
       if (any(grepl("B2_min5", mod_vars))) {
-        r[["B2_min5"]] <- focal(r[["B2"]], w = 5, fun = "min", na.policy = "omit", na.rm = TRUE)
+        r[["B2_min5"]] <- terra::focal(r[["B2"]], w = 5, fun = "min", na.policy = "omit", na.rm = TRUE)
       }
       if (any(grepl("B5_min5", mod_vars))) {
-        r[["B5_min5"]] <- focal(r[["B5"]], w = 5, fun = "min", na.policy = "omit", na.rm = TRUE)
+        r[["B5_min5"]] <- terra::focal(r[["B5"]], w = 5, fun = "min", na.policy = "omit", na.rm = TRUE)
       }
       if (any(grepl("B7_min5", mod_vars))) {
-        r[["B7_min5"]] <- focal(r[["B7"]], w = 5, fun = "min", na.policy = "omit", na.rm = TRUE)
+        r[["B7_min5"]] <- terra::focal(r[["B7"]], w = 5, fun = "min", na.policy = "omit", na.rm = TRUE)
       }
       
       if (any(grepl("B2_max5", mod_vars))) {
-        r[["B2_max5"]] <- focal(r[["B2"]], w = 5, fun = "max", na.policy = "omit", na.rm = TRUE)
+        r[["B2_max5"]] <- terra::focal(r[["B2"]], w = 5, fun = "max", na.policy = "omit", na.rm = TRUE)
       }
       if (any(grepl("B5_max5", mod_vars))) {
-        r[["B5_max5"]] <- focal(r[["B5"]], w = 5, fun = "max", na.policy = "omit", na.rm = TRUE)
+        r[["B5_max5"]] <- terra::focal(r[["B5"]], w = 5, fun = "max", na.policy = "omit", na.rm = TRUE)
       }
       if (any(grepl("B7_max5", mod_vars))) {
-        r[["B7_max5"]] <- focal(r[["B7"]], w = 5, fun = "max", na.policy = "omit", na.rm = TRUE)
+        r[["B7_max5"]] <- terra::focal(r[["B7"]], w = 5, fun = "max", na.policy = "omit", na.rm = TRUE)
       }
       
       if (any(grepl("B2_std5", mod_vars))) {
-        r[["B2_std5"]] <- focal(r[["B2"]], w = 5, fun = "sd", na.policy = "omit", na.rm = TRUE)
+        r[["B2_std5"]] <- terra::focal(r[["B2"]], w = 5, fun = "sd", na.policy = "omit", na.rm = TRUE)
       }
       if (any(grepl("B5_std5", mod_vars))) {
-        r[["B5_std5"]] <- focal(r[["B5"]], w = 5, fun = "sd", na.policy = "omit", na.rm = TRUE)
+        r[["B5_std5"]] <- terra::focal(r[["B5"]], w = 5, fun = "sd", na.policy = "omit", na.rm = TRUE)
       }
       if (any(grepl("B7_std5", mod_vars))) {
-        r[["B7_std5"]] <- focal(r[["B7"]], w = 5, fun = "sd", na.policy = "omit", na.rm = TRUE)
+        r[["B7_std5"]] <- terra::focal(r[["B7"]], w = 5, fun = "sd", na.policy = "omit", na.rm = TRUE)
       }
       
       # Calculate previous classification probabilities if they are used in the model
-      rrrr <- rast(ncols = 180, nrows = 180, xmin = 0)
-      fm <- focalMat(rrrr, 5, "circle")
+      rrrr <- terra::rast(ncols = 180, nrows = 180, xmin = 0)
+      fm <- terra::focalMat(rrrr, 5, "circle")
       fm[fm > 0] <- 1
       
       if ("cirrus_probs5" %in% mod_vars) {
         cirrus_probs5 <- r[[1]]
-        cirrus_probs5[] <- unlist(lapply(as.numeric(values(r[["QA"]])), mask_cirrus))
-        r[["cirrus_probs5"]] <- focal(cirrus_probs5, w = fm, fun = "mean", na.policy = "omit", na.rm = TRUE)
+        cirrus_probs5[] <- unlist(lapply(as.numeric(terra::values(r[["QA"]])), mask_cirrus))
+        r[["cirrus_probs5"]] <- terra::focal(cirrus_probs5, w = fm, fun = "mean", na.policy = "omit", na.rm = TRUE)
       }
       if ("cloud_probs5" %in% mod_vars) {
         cloud_probs5 <- r[[1]]
-        cloud_probs5[] <- unlist(lapply(as.numeric(values(r[["QA"]])), mask_cloud))
-        r[["cloud_probs5"]] <- focal(cloud_probs5, w = fm, fun = "mean", na.policy = "omit", na.rm = TRUE)
+        cloud_probs5[] <- unlist(lapply(as.numeric(terra::values(r[["QA"]])), mask_cloud))
+        r[["cloud_probs5"]] <- terra::focal(cloud_probs5, w = fm, fun = "mean", na.policy = "omit", na.rm = TRUE)
       }
       if ("cshadow_probs5" %in% mod_vars) {
         cshadow_probs5 <- r[[1]]
-        cshadow_probs5[] <- unlist(lapply(as.numeric(values(r[["QA"]])), mask_cshadow))
-        r[["cshadow_probs5"]] <- focal(cshadow_probs5, w = fm, fun = "mean", na.policy = "omit", na.rm = TRUE)
+        cshadow_probs5[] <- unlist(lapply(as.numeric(terra::values(r[["QA"]])), mask_cshadow))
+        r[["cshadow_probs5"]] <- terra::focal(cshadow_probs5, w = fm, fun = "mean", na.policy = "omit", na.rm = TRUE)
       }
       if ("snow_probs5" %in% mod_vars) {
         snow_probs5 <- r[[1]]
-        snow_probs5[] <- unlist(lapply(as.numeric(values(r[["QA"]])), mask_snow))
-        r[["snow_probs5"]] <- focal(snow_probs5, w = fm, fun = "mean", na.policy = "omit", na.rm = TRUE)
+        snow_probs5[] <- unlist(lapply(as.numeric(terra::values(r[["QA"]])), mask_snow))
+        r[["snow_probs5"]] <- terra::focal(snow_probs5, w = fm, fun = "mean", na.policy = "omit", na.rm = TRUE)
       }
       if ("water_probs5" %in% mod_vars) {
         water_probs5 <- r[[1]]
-        water_probs5[] <- unlist(lapply(as.numeric(values(r[["QA"]])), mask_water))
-        r[["water_probs5"]] <- focal(water_probs5, w = fm, fun = "mean", na.policy = "omit", na.rm = TRUE)
+        water_probs5[] <- unlist(lapply(as.numeric(terra::values(r[["QA"]])), mask_water))
+        r[["water_probs5"]] <- terra::focal(water_probs5, w = fm, fun = "mean", na.policy = "omit", na.rm = TRUE)
       }
       if ("clear_probs5" %in% mod_vars) {
         clear_probs5 <- r[[1]]
-        clear_probs5[] <- unlist(lapply(as.numeric(values(r[["QA"]])), mask_clear))
-        r[["clear_probs5"]] <- focal(clear_probs5, w = fm, fun = "mean", na.policy = "omit", na.rm = TRUE)
+        clear_probs5[] <- unlist(lapply(as.numeric(terra::values(r[["QA"]])), mask_clear))
+        r[["clear_probs5"]] <- terra::focal(clear_probs5, w = fm, fun = "mean", na.policy = "omit", na.rm = TRUE)
       }
       if ("cloud_probs25" %in% mod_vars) {
-        fm <- focalMat(rrrr, 25, "circle")
+        fm <- terra::focalMat(rrrr, 25, "circle")
         fm[fm > 0] <- 1
         
         cloud_probs25 <- r[[1]]
-        cloud_probs25[] <- unlist(lapply(as.numeric(values(r[["QA"]])), mask_cloud))
-        r[["cloud_probs25"]] <- focal(cloud_probs25, w = fm, fun = "mean", na.policy = "omit", na.rm = TRUE)
+        cloud_probs25[] <- unlist(lapply(as.numeric(terra::values(r[["QA"]])), mask_cloud))
+        r[["cloud_probs25"]] <- terra::focal(cloud_probs25, w = fm, fun = "mean", na.policy = "omit", na.rm = TRUE)
       }
       
       # Combine all rasters into a single raster stack
@@ -338,8 +338,8 @@ classifying_function <- function(imageid, image_df, predictor_dir, class_landsat
       
       # Convert the raster stack to a data frame and filter out rows with NA values in the QA band
       d <- as.data.frame(r, na.rm = FALSE) %>%
-        filter(!is.na(QA)) %>%
-        mutate(across(ends_with("tpi"), ~ ifelse(is.na(.x), 0, .x)))
+        dplyr::filter(!is.na(QA)) %>%
+        dplyr::mutate(dplyr::across(dplyr::ends_with("tpi"), ~ ifelse(is.na(.x), 0, .x)))
       
       if(nrow(d) == 0){
         
@@ -353,15 +353,15 @@ classifying_function <- function(imageid, image_df, predictor_dir, class_landsat
         
         rr <- rr[[-1]]
         # plot(rr)
-        writeRaster(rr, paste0(class_landsat_dir, "/", imageid),
-                    datatype = "INT1U", overwrite = T)
+        terra::writeRaster(rr, paste0(class_landsat_dir, "/", imageid),
+                           datatype = "INT1U", overwrite = T)
         
         return(imageid)
         
       } else {
         layers <- c("B1","B2","B3","B4","B5","B6","B7",
-                    names(d %>% select(ends_with("_min5"), ends_with("_max5"), ends_with("_std5")) %>% 
-                            select(-starts_with("B2"))))
+                    names(d %>% dplyr::select(dplyr::ends_with("_min5"), dplyr::ends_with("_max5"), dplyr::ends_with("_std5")) %>% 
+                            dplyr::select(-starts_with("B2"))))
         for(i in layers){
           # print(i)
           layers <- layers[-1]
@@ -371,15 +371,15 @@ classifying_function <- function(imageid, image_df, predictor_dir, class_landsat
         }
         
         d <- d %>% 
-          mutate(satid = ifelse(satid == "LT04", "LT05", satid))
+          dplyr::mutate(satid = ifelse(satid == "LT04", "LT05", satid))
         
         # Replace NA values with 0 and convert factor columns to numeric
         d <- d %>% 
-          mutate(across(everything(), ~ifelse(is.nan(.x), 0, .x)))
+          dplyr::mutate(dplyr::across(dplyr::everything(), ~ifelse(is.nan(.x), 0, .x)))
         
         std_names <- names(d)[grepl("_std", names(d))]
         d <- d %>% 
-          mutate(across(all_of(std_names), ~ifelse(is.na(.x), 0, .x)))
+          dplyr::mutate(dplyr::across(dplyr::all_of(std_names), ~ifelse(is.na(.x), 0, .x)))
         
         # PREDICTIONS
         if(satid %in% c("LT05","LT04")){
@@ -435,7 +435,6 @@ classifying_function <- function(imageid, image_df, predictor_dir, class_landsat
     }
   }
 }
-
 
 # Internal helper function to calculate a mode
 getmode <- function(v) {
