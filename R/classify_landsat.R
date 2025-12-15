@@ -182,8 +182,6 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir, w
     future.scheduling = 10
   )
   
-  snowman_cleanup()
-  
   return(unlist(lss))
 }
 
