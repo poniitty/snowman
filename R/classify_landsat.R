@@ -114,6 +114,7 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir, w
         base_landsat_dir = base_landsat_dir, 
         site_name = site_name, 
         force = force,
+        paral = FALSE,
         mod7 = mod7, mod5 = mod5, mod8 = mod8
       )}
     )
@@ -174,6 +175,7 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir, w
       base_landsat_dir = base_landsat_dir, 
       site_name = site_name, 
       force = force,
+      paral = TRUE,
       mod7 = mod7, mod5 = mod5, mod8 = mod8
     )},
     future.packages = c("dplyr", "sf", "terra", "lubridate",
@@ -188,10 +190,18 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir, w
 # Internal Function to Classify a Single Landsat Image
 classifying_function <- function(imageid, image_df, predictor_dir, class_landsat_dir,
                                  base_landsat_dir, site_name, force = FALSE,
-                                 mod8, mod7, mod5) {
+                                 mod8, mod7, mod5, paral = TRUE) {
   # imageid <- image_df$file[[1]]
   # Check if the classified raster already exists
   if (!file.exists(paste0(class_landsat_dir, "/", imageid)) | force == TRUE) {
+    
+    # When distribute images across several cores, 
+    # turn internal parallelization off
+    if(paral){
+      terra::terraOptions(threads = 1) 
+      options(rf.cores = 1, mc.cores = 1)
+    }
+    
     # Get the satellite ID from the image metadata
     satid <- image_df %>% dplyr::filter(file == imageid) %>% dplyr::pull(satid)
     
