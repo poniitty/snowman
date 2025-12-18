@@ -98,7 +98,7 @@ calc_snow_variables <- function(image_df, site_name, base_landsat_dir, workers =
     }
   }
   
-  # Filter out fully cloudy images
+  # Filter out mostly cloudy images
   image_df <- image_df %>%
     filter(cloud_proportion_own < 0.80)
   
@@ -126,7 +126,7 @@ calc_snow_variables <- function(image_df, site_name, base_landsat_dir, workers =
     # Raster list to data frame
     mm <- rs %>%
       map(nosnow_values) %>%
-      reduce(bind_rows)
+      bind_rows
     
     rtemp <- rs[[1]][[1]]
     
@@ -185,10 +185,7 @@ calc_snow_variables <- function(image_df, site_name, base_landsat_dir, workers =
       
       # Load required packages on each worker node
       clusterEvalQ(cl, {
-        library(dplyr)
-        library(tidyr)
         library(mgcv)
-        library(zoo)
       })
       
       results <- parLapply(cl, mm %>%
@@ -269,98 +266,90 @@ read_classifications <- function(imagedf, basedir) {
 cal_scd <- function(d_all, extradf) {
   # d_all <- mm %>% mutate(cell2 = cell) %>% nest(data = -cell2) %>% slice(1) %>% pull(data)
   # d_all <- d_all[[1]]
-  cellid <- d_all$cell[1]
   
-  d_all <- bind_rows(d_all %>% select(nosnow, nosnow_prop, doy, year, month, week) %>% drop_na() %>%
-                       rename(snow = nosnow, prop = nosnow_prop),
-                     d_all %>% select(snow, snow_prop, doy, year, month, week) %>% drop_na() %>%
-                       rename(prop = snow_prop))
+  d_clean <- rbind(setNames(d_all[,c("nosnow","nosnow_prop","doy","year")],c("snow","prop","doy","year")),
+                   setNames(d_all[,c("snow","snow_prop","doy","year")],c("snow","prop","doy","year")))
+  d_clean <- d_clean[!(is.na(d_clean$snow) | is.na(d_clean$prop)),]
   
-  results <- tibble(cell = cellid,
-                    nobs = d_all %>% select(doy, year) %>% distinct() %>% nrow,
-                    nyears = length(unique(d_all$year)),
-                    gamr2 = as.numeric(NA),
-                    max_snow_doy = as.numeric(NA), min_snow_doy = as.numeric(NA),
-                    max_snow_prop = as.numeric(NA), min_snow_prop = as.numeric(NA),
-                    scd_raw = as.numeric(NA), snow_days = as.numeric(NA),
-                    scd = as.numeric(NA), melt = as.numeric(NA), ns = as.numeric(NA))
+  results <- list(
+    cell = d_all$cell[1], nobs = length(unique(d_clean$doy + (d_clean$year * 1000))),
+    nyears = length(unique(d_clean$year)), gamr2 = NA, 
+    max_snow_doy = NA, min_snow_doy = NA, max_snow_prop = NA, min_snow_prop = NA,
+    scd_raw = NA, snow_days = NA, scd = NA, melt = NA, ns = NA
+  )
   
-  
-  
-  if (nrow(d_all) > 20) {
+  if (results$nobs > 20) {
     
     if (!is.null(extradf)) {
-      d_all <- bind_rows(extradf, d_all)
+      d_clean <- rbind(extradf[, c("snow", "prop", "doy")], d_clean[,-4])
     }
     
-    results$scd_raw <- round(weighted.mean(d_all$snow, d_all$prop) * 365, 1)
+    results$scd_raw <- round(weighted.mean(d_clean$snow, d_clean$prop) * 365, 1)
     
-    if ((results$scd_raw / 365) > 0.01 | (results$scd_raw / 365) < 0.99 | !is.nan(results$scd_raw)) {
-      pred_grid <- expand.grid(doy = 1:365)
+    if ((results$scd_raw / 365) > 0.02 & (results$scd_raw / 365) < 0.98 & !is.nan(results$scd_raw)) {
       
       e <- try({
-        d_all %>%
-          mutate(year = factor(year)) %>%
-          gam(snow ~ s(doy, bs = "cc", k = 5),
-              knots = list(doy = c(1, 365)),
-              data = ., family = "binomial", weights = prop, method = "REML") -> gammod
+        gammod <- gam(snow ~ s(doy, bs = "cc", k = 5),
+                      knots = list(doy = c(1, 365)),
+                      data = d_clean, family = "binomial", weights = prop, method = "REML",
+                      control = list(epsilon = 1e-04,  # Lower precision (default is 1e-07)
+                                     maxit = 50))
       }, silent = TRUE)
       
       if (!inherits(e, "try-error")) {
-        gamsum <- summary(gammod)
-        pred_grid$pred <- predict(gammod, pred_grid, type = "response", se.fit = FALSE)
-        # pred_grid$pred <- preds$fit
-        # pred_grid$ci <- preds$se.fit * 1.96
         
-        results$gamr2 <- gamsum$r.sq
-        results$scd <- round(sum(pred_grid$pred), 1)
-        results$snow_days <- round(sum(pred_grid$pred >= 0.5),1)
+        pred <- predict(gammod, data.frame(doy = 1:365), type = "response", se.fit = FALSE)
         
-        pred_grid <- bind_rows(pred_grid, pred_grid) %>%
-          mutate(doy = row_number())
+        results$gamr2 <- 1 - (gammod$deviance / gammod$null.deviance)
+        results$scd <- round(sum(pred), 1)
+        results$snow_days <- round(sum(pred >= 0.5),1)
         
-        pred_grid <- pred_grid %>%
-          mutate(mv_mean = rollmean(pred, k = 30, align = "center", na.pad = TRUE))
+        padded_pred <- c(pred[336:365], pred, pred[1:30])
+        mv_mean <- stats::filter(padded_pred, rep(1/30, 30), sides = 2)
+        mv_mean <- as.numeric(mv_mean[31:395]) # Extract the 1:365 part
         
-        max_doy_orig <- which.max(pred_grid$mv_mean)
-        max_doy_orig <- ifelse(max_doy_orig > 365, max_doy_orig - 365, max_doy_orig)
+        results$max_snow_doy <- which.max(mv_mean)
+        results$min_snow_doy <- which.min(mv_mean)
+        results$max_snow_prop <- round(max(mv_mean), 3)
+        results$min_snow_prop <- round(min(mv_mean), 3)
         
-        min_doy_orig <- which.min(pred_grid$mv_mean)
-        min_doy_orig <- ifelse(min_doy_orig > 365, min_doy_orig - 365, min_doy_orig)
         
-        results$max_snow_doy <- max_doy_orig
-        results$min_snow_doy <- min_doy_orig
-        results$max_snow_prop <- round(max(pred_grid$mv_mean, na.rm = TRUE), 3)
-        results$min_snow_prop <- round(min(pred_grid$mv_mean, na.rm = TRUE), 3)
-        
-        if (min(pred_grid$pred) < 0.5 & max(pred_grid$pred) > 0.5) {
-          pred_grid <- pred_grid %>%
-            slice(max_doy_orig:nrow(.)) %>%
-            mutate(doy = row_number())
+        if (results$min_snow_prop < 0.5 & results$max_snow_prop > 0.5) {
           
-          max_doy <- which.max(pred_grid$mv_mean)
-          min_doy <- which.min(pred_grid$mv_mean)
+          p_expanded <- c(pred, pred)
+          idx_max <- results$max_snow_doy
+          idx_min <- results$min_snow_doy
           
-          results$melt <- which.max(pred_grid$pred[max_doy:730] < 0.5) + max_doy - 1 + max_doy_orig - 1
-          results$ns <- which.max(pred_grid$pred[min_doy:730] > 0.5) + min_doy - 1 + max_doy_orig - 1
+          # Find melt and snow onset with a safety check
+          search_melt <- p_expanded[idx_max:730] < 0.5
+          m_idx <- match(TRUE, search_melt)
+          if(!is.na(m_idx)) results$melt <- m_idx + idx_max - 1
+          
+          search_ns <- p_expanded[idx_min:730] > 0.5
+          n_idx <- match(TRUE, search_ns)
+          if(!is.na(n_idx)) results$ns <- n_idx + idx_min - 1
+          
         }
       }
     }
   }
   
-  return(results)
+  return(as.data.frame(results))
 }
 
 # Internal Function to Prepare No-Snow Values
+# x <- rs[[1]]
 nosnow_values <- function(x) {
   r <- x
   x[["nosnow"]][!is.na(x[["nosnow"]])] <- 0
   x[["snow"]][!is.na(x[["snow"]])] <- 1
-  m <- values(c(x, r), dataframe = TRUE) %>%
-    set_names(c("nosnow", "snow", "nosnow.1", "snow.1")) %>%
-    rownames_to_column("cell") %>%
-    mutate(cell = as.integer(cell)) %>%
-    rename(nosnow_prop = nosnow.1,
-           snow_prop = snow.1)
-  return(m)
+  v_mat <- values(c(x, r), mat = TRUE) 
+  
+  tibble::tibble(
+    cell = 1:nrow(v_mat), # Assuming all rasters have same extent/cell count
+    nosnow = v_mat[, 1], # nosnow from original
+    snow = v_mat[, 2],    # snow from original
+    nosnow_prop = v_mat[, 3], # nosnow from original
+    snow_prop = v_mat[, 4]    # snow from original
+  )
 }
