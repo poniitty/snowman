@@ -1,0 +1,13 @@
+To cite package 'snowman' in publications, use:
+
+  Niittynen, Pekka. (2026). snowman: an open-source R package for automated 30-m snow and ice cover mapping using the Landsat archive. EarthArXiv. https://doi.org/10.31223/X5FF32
+
+A BibTeX entry for LaTeX users is:
+
+  @article{niittynen2026snowman,
+    title={snowman: an open-source R package for automated 30-m snow and ice cover mapping using the Landsat archive},
+    author={Niittynen, Pekka},
+    year={2026},
+    url = {https://doi.org/10.31223/X5FF32},
+    publisher={EarthArXiv}
+  }
