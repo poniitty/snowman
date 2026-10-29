@@ -89,43 +89,48 @@ calc_predictors <- function(image_df, site_name, base_landsat_dir, data_source =
                   limit = 1000) %>%
       get_request()
     
-    juuh <- lapply(it_obj$features, function(ft) {
+    # Collect the URLs of all ALOS DSM tiles that intersect the AOI
+    dem_urls <- unlist(lapply(it_obj$features, function(ft) {
       full_url <- make_vsicurl_url_dem(assets_url(ft) %>% sort)
-      full_url <- full_url[endsWith(full_url, "_DSM.tif")]
-      file_names <- gsub("TIF$", "tif", basename(full_url))
-      
-      juuh <- lapply(seq_len(length(full_url)), function(nr) {
-        e <- try({
-          gdal_utils(
-            "warp",
-            source = full_url[[nr]],
-            destination = paste0(predictor_dir, "/", file_names[[nr]]),
-            options = c(
-              "-t_srs", st_crs(aoi)$wkt,
-              "-te", st_bbox(aoi),
-              "-tr", c(30, 30)
-            )
-          )
-        }, silent = TRUE)
-        if (class(e)[[1]] == "try-error") {
-          return(FALSE)
-        } else {
-          return(TRUE)
-        }
-      })
-    })
-    
-    dems <- list.files(predictor_dir, pattern = "_DSM.tif", full.names = TRUE)
-    dems <- lapply(dems, function(x) {
-      dem <- rast(x)
-      dem[dem == 0] <- NA
-      return(dem)
-    })
-    
-    dem <- sprc(dems)
-    dem <- mosaic(dem)
+      full_url[endsWith(full_url, "_DSM.tif")]
+    }))
+
+    # Combine the tiles into ONE seamless virtual mosaic (still in lat/lon)
+    # and reproject that in a single step. Warping each tile separately and
+    # mosaicking afterwards leaves edge strips without data along the tile
+    # borders, which were then set to 0 m elevation (= the lines).
+    # "-resolution highest" because tiles north of 60N have coarser
+    # longitude spacing than tiles further south.
+    vrt_file <- file.path(predictor_dir, "alos_dsm.vrt")
+    gdal_utils("buildvrt",
+               source = dem_urls,
+               destination = vrt_file,
+               options = c("-resolution", "highest", "-overwrite"))
+
+    dem_file <- file.path(predictor_dir, "alos_dsm_warped.tif")
+    gdal_utils("warp",
+               source = vrt_file,
+               destination = dem_file,
+               options = c(
+                 "-t_srs", st_crs(aoi)$wkt,
+                 "-te", st_bbox(aoi),
+                 "-tr", c(30, 30),
+                 "-r", "bilinear",
+                 "-dstnodata", "-9999",
+                 "-overwrite"
+               ))
+
+    dem <- rast(dem_file) * 1  # read into memory so the temp files can be deleted
+    dem[dem < -500] <- NA      # remaining void / nodata values
+
+    # Fill possible small voids from their neighbours instead of setting them to 0
+    for (i in 1:20) {
+      if (!any(is.na(values(dem, mat = FALSE)))) break
+      dem <- focal(dem, 3, "mean", na.policy = "only", na.rm = TRUE)
+    }
     dem[dem < 0] <- 0
     dem[is.na(dem)] <- 0
+    unlink(c(vrt_file, dem_file))
     
     # ESA WorldCover from STAC
     it_obj <- s_obj %>%
@@ -508,6 +513,7 @@ make_vsicurl_url_esa <- function(base_url) {
 # Internal Functions to extract pixel information from the Landsat Quality Assesment (QA) layer
 mask_fill <- function(x) {as.numeric(intToBits(x)[1])}
 mask_dilcloud <- function(x) {as.numeric(intToBits(x)[2])}
+mask_cirrus <- function(x) {as.numeric(intToBits(x)[3])}
 mask_cloud <- function(x) {as.numeric(intToBits(x)[4])}
 mask_cshadow <- function(x) {as.numeric(intToBits(x)[5])}
 mask_snow <- function(x) {as.numeric(intToBits(x)[6])}

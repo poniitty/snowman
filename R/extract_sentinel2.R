@@ -522,8 +522,6 @@ process_feature_s2 <- function(ft, area_sentinel2_dir, aoi, exte, reso) {
 #   9  = Cloud high probability
 #   10 = Thin cirrus
 calc_coverages_s2 <- function(image, image_dir) {
-  require(terra)
-  require(dplyr)
 
   fpath <- file.path(image_dir, image)
 
@@ -538,8 +536,8 @@ calc_coverages_s2 <- function(image, image_dir) {
 
     # 1. Fill Proportion: pixels where B04 == 0 indicate no-data fill areas.
     #    (Mirrors the Landsat approach of checking band 4 for zero values.)
-    fill_tab      <- terra::freq(rs[["B04"]], value = 0)
-    fill_count    <- if (nrow(fill_tab) > 0) fill_tab[1, "count"] else 0
+    #    Images are written with NAflag = 0, so fill pixels are read back as NA.
+    fill_count    <- sum(is.na(terra::values(rs[["B04"]], mat = FALSE)))
     fill_prop_val <- fill_count / n_pixels
 
     # 2. Cloud Proportion via SCL integer classes.

@@ -87,17 +87,17 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir, w
   
   # Load pretrained models
   if(any(c("LT05","LT04") %in% unique(image_df$satid))){
-    mod5 <- readRDS(paste0(model_dir, "latest_TM05.rds"))
+    mod5 <- readRDS(file.path(model_dir, "latest_TM05.rds"))
   } else {
     mod5 <- NULL
   }
   if(any(c("LE07") %in% unique(image_df$satid))){
-    mod7 <- readRDS(paste0(model_dir, "latest_LE07.rds"))
+    mod7 <- readRDS(file.path(model_dir, "latest_LE07.rds"))
   } else {
     mod7 <- NULL
   }
   if(any(c("LC08","LC09") %in% unique(image_df$satid))){
-    mod8 <- readRDS(paste0(model_dir, "latest_LC08.rds"))
+    mod8 <- readRDS(file.path(model_dir, "latest_LC08.rds"))
   } else {
     mod8 <- NULL
   }
@@ -106,7 +106,7 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir, w
     message(paste0("Only ", nrow(image_df), " images to classify. Forced to sequential job!"))
     
     lss <- lapply(image_df$file, function(f) {
-      classifying_function(
+      safe_classify(
         imageid = f, 
         image_df = image_df,
         predictor_dir = predictor_dir, 
@@ -119,7 +119,7 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir, w
       )}
     )
     
-    return(unlist(lss))
+    return(summarise_classifications(lss))
     
   }
   
@@ -167,7 +167,7 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir, w
   
   # Apply the classifying function to each image file in parallel
   lss <- future.apply::future_lapply(image_df$file, function(f) {
-    classifying_function(
+    safe_classify(
       imageid = f, 
       image_df = image_df,
       predictor_dir = predictor_dir, 
@@ -184,7 +184,32 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir, w
     future.scheduling = 10
   )
   
-  return(unlist(lss))
+  return(summarise_classifications(lss))
+}
+
+# Internal wrapper: an error in one image does not stop the whole run.
+# Returns list(file, ok, msg).
+safe_classify <- function(imageid, ...) {
+  tryCatch({
+    out <- classifying_function(imageid = imageid, ...)
+    list(file = imageid, ok = !is.null(out), msg = NA_character_)
+  }, error = function(e) {
+    list(file = imageid, ok = FALSE, msg = conditionMessage(e))
+  })
+}
+
+# Internal: collect results, warn about failed images, return classified ids
+summarise_classifications <- function(lss) {
+  failed <- Filter(function(x) !x$ok && !is.na(x$msg), lss)
+  if (length(failed) > 0) {
+    msgs <- vapply(failed, function(x) paste0(x$file, ": ", x$msg), character(1))
+    warning(length(failed), " image(s) could not be classified:\n",
+            paste(utils::head(msgs, 20), collapse = "\n"),
+            if (length(msgs) > 20) "\n..." else "",
+            call. = FALSE)
+  }
+  ok <- vapply(lss, function(x) isTRUE(x$ok), logical(1))
+  unlist(lapply(lss[ok], `[[`, "file"))
 }
 
 # Internal Function to Classify a Single Landsat Image
@@ -277,19 +302,16 @@ classifying_function <- function(imageid, image_df, predictor_dir, class_landsat
       # Calculate median Landsat differences if they are used in the model
       idate <- as.character(lubridate::ymd(stringr::str_split(imageid, "_")[[1]][4]))
       mo <- lubridate::month(idate)
-      e <- try({
-        mr <- terra::rast(paste0(predictor_dir, "/medianlandsat_", mo, ".tif"))
-      })
-      if (class(e) == "try-error") {
-        e <- try({
-          mr <- terra::rast(paste0(predictor_dir, "/medianlandsat_", mo + 1, ".tif"))
-        })
+      # Use the median image of the same month, or of the nearest available
+      # month (circular distance, so December is next to January)
+      mr_files <- list.files(predictor_dir, pattern = "^medianlandsat_[0-9]+\\.tif$")
+      if (length(mr_files) == 0) {
+        stop("No medianlandsat_*.tif files found. Run calc_predictors() first.")
       }
-      if (class(e) == "try-error") {
-        e <- try({
-          mr <- terra::rast(paste0(predictor_dir, "/medianlandsat_", mo - 1, ".tif"))
-        })
-      }
+      avail_mo <- as.numeric(gsub("medianlandsat_|\\.tif", "", mr_files))
+      mo_dist <- pmin(abs(avail_mo - mo), 12 - abs(avail_mo - mo))
+      mo_use <- avail_mo[which.min(mo_dist)]
+      mr <- terra::rast(paste0(predictor_dir, "/medianlandsat_", mo_use, ".tif"))
       
       mr_diff <- mr - r[[1:7]]
       names(mr_diff) <- paste0("mr_diff_", names(mr_diff))
@@ -405,7 +427,7 @@ classifying_function <- function(imageid, image_df, predictor_dir, class_landsat
       r[["QA"]][is.na(r[["B7"]])] <- NA
       
       # Convert the raster stack to a data frame and filter out rows with NA values in the QA band
-      d <- as.data.frame(r, na.rm = FALSE) %>%
+      d <- as.data.frame(r, na.rm = FALSE, cells = TRUE) %>%
         dplyr::filter(!is.na(QA)) %>%
         dplyr::mutate(dplyr::across(dplyr::ends_with("tpi"), ~ ifelse(is.na(.x), 0, .x)))
       
@@ -450,53 +472,47 @@ classifying_function <- function(imageid, image_df, predictor_dir, class_landsat
           dplyr::mutate(dplyr::across(dplyr::all_of(std_names), ~ifelse(is.na(.x), 0, .x)))
         
         # PREDICTIONS
-        if(satid %in% c("LT05","LT04")){
-          preds <- predict(mod5, d, importance = "none", na.action = "na.omit")
-          preds <- tibble(pred = preds$class) %>% 
-            bind_cols(preds$predicted %>% as.data.frame()) %>% 
-            mutate(across(`1`:`5`, ~round(.x*100)))
-        }
-        if(satid == "LE07"){
-          preds <- predict(mod7, d, importance = "none", na.action = "na.omit")
-          preds <- tibble(pred = preds$class) %>% 
-            bind_cols(preds$predicted %>% as.data.frame()) %>% 
-            mutate(across(`1`:`4`, ~round(.x*100)))
-        }
-        if(satid %in% c("LC08","LC09")){
-          preds <- predict(mod8, d, importance = "none", na.action = "na.omit")
-          preds <- tibble(pred = preds$class) %>% 
-            bind_cols(preds$predicted %>% as.data.frame()) %>% 
-            mutate(across(`1`:`4`, ~round(.x*100)))
-        }
-        # d %>% select(-RADSAT) %>% filter(!complete.cases(.))
-        rm(d)
-        # ¨71§ 
-        if(nrow(preds) == length(na.omit(values(r[["QA"]], mat = F)))){
-          rr <- r[["QA"]]
-          rr[["class"]] <- 0
-          rr[["class"]][!is.na(r[["QA"]])] <- as.numeric(preds$pred)
-          rr[["land"]] <- 0
-          rr[["land"]][!is.na(r[["QA"]])] <- as.numeric(preds$`1`)
-          rr[["water"]] <- 0
-          rr[["water"]][!is.na(r[["QA"]])] <- as.numeric(preds$`2`)
-          rr[["snow"]] <- 0
-          rr[["snow"]][!is.na(r[["QA"]])] <- as.numeric(preds$`3`)
-          rr[["cloud"]] <- 0
-          rr[["cloud"]][!is.na(r[["QA"]])] <- as.numeric(preds$`4`)
-          rr[["artif"]] <- 0
-          if(satid %in% c("LT05","LT04")){
-            rr[["artif"]][!is.na(r[["QA"]])] <- as.numeric(preds$`5`)
-          }
-          
-          rr[is.na(r[["QA"]])] <- NA
-          rr <- rr[[-1]]
-          # plot(rr)
-          # plotRGB(r, r=7, g=5, b=2, stretch = "lin")
-          writeRaster(rr, paste0(class_landsat_dir, "/", imageid),
-                      datatype = "INT1U", overwrite = T)
+        if (satid %in% c("LT05", "LT04")) {
+          mod <- mod5
+          n_class <- 5
+        } else if (satid == "LE07") {
+          mod <- mod7
+          n_class <- 4
         } else {
-          stop("Error: The number of predictions does not match the number of non-NA pixels in the QA band.")
+          mod <- mod8
+          n_class <- 4
         }
+        
+        # Predict only pixels where all model predictors are available.
+        # Pixels with any missing predictor are left NA in the output instead
+        # of stopping the whole classification.
+        pred_vars <- base::intersect(mod$xvar.names, names(d))
+        missing_vars <- setdiff(mod$xvar.names, names(d))
+        if (length(missing_vars) > 0) {
+          stop("Predictors missing from the data: ", paste(missing_vars, collapse = ", "))
+        }
+        ok_rows <- stats::complete.cases(d[, pred_vars, drop = FALSE])
+        d <- d[ok_rows, , drop = FALSE]
+        
+        out_names <- c("class", "land", "water", "snow", "cloud", "artif")
+        vals <- matrix(NA_real_, nrow = terra::ncell(r), ncol = length(out_names))
+        
+        if (nrow(d) > 0) {
+          preds <- predict(mod, d, importance = "none", na.action = "na.omit")
+          probs <- round(as.matrix(preds$predicted)[, seq_len(n_class), drop = FALSE] * 100)
+          if (nrow(probs) != nrow(d)) {
+            stop("The number of predictions does not match the number of predicted pixels.")
+          }
+          vals[d$cell, 1] <- as.numeric(preds$class)
+          vals[d$cell, 2:5] <- probs[, 1:4]
+          vals[d$cell, 6] <- if (n_class == 5) probs[, 5] else 0
+        }
+        rm(d)
+        
+        rr <- terra::rast(r[["QA"]], nlyrs = length(out_names), names = out_names)
+        terra::values(rr) <- vals
+        terra::writeRaster(rr, paste0(class_landsat_dir, "/", imageid),
+                           datatype = "INT1U", overwrite = TRUE)
         
         return(imageid)
       }

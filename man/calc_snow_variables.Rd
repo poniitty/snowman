@@ -4,7 +4,13 @@
 \alias{calc_snow_variables}
 \title{Calculate Snow Variables}
 \usage{
-calc_snow_variables(image_df, site_name, base_landsat_dir, workers = 1)
+calc_snow_variables(
+  image_df,
+  site_name,
+  base_landsat_dir,
+  workers = 1,
+  chunk_cells = 20000
+)
 }
 \arguments{
 \item{image_df}{A tibble, the output from the \code{extract_landsat} or \code{search_image_df} functions.}
@@ -15,6 +21,9 @@ calc_snow_variables(image_df, site_name, base_landsat_dir, workers = 1)
 
 \item{workers}{A numeric value representing the number of workers for parallel processing.
 Setting workers > 1 (default) enables parallel computing across multiple nodes.}
+
+\item{chunk_cells}{Approximate number of pixels processed at a time. Lower values
+reduce memory use (memory scales with chunk_cells x number of images).}
 }
 \value{
 A SpatRaster object containing the snow variables.
