@@ -102,10 +102,11 @@ calc_predictors <- function(image_df, site_name, base_landsat_dir, data_source =
     # "-resolution highest" because tiles north of 60N have coarser
     # longitude spacing than tiles further south.
     vrt_file <- file.path(predictor_dir, "alos_dsm.vrt")
+    if (file.exists(vrt_file)) unlink(vrt_file) # buildvrt via sf has no -overwrite
     gdal_utils("buildvrt",
                source = dem_urls,
                destination = vrt_file,
-               options = c("-resolution", "highest", "-overwrite"))
+               options = c("-resolution", "highest"))
 
     dem_file <- file.path(predictor_dir, "alos_dsm_warped.tif")
     gdal_utils("warp",
@@ -136,7 +137,7 @@ calc_predictors <- function(image_df, site_name, base_landsat_dir, data_source =
     it_obj <- s_obj %>%
       stac_search(collections = "esa-worldcover",
                   bbox = st_bbox(aoi %>% st_transform(4326)),
-                  datetime = "2021-01-01/2021-12-31",
+                  datetime = stac_datetime("2021-01-01", "2021-12-31"),
                   limit = 1000) %>%
       get_request()
     
@@ -487,6 +488,14 @@ calc_predictors <- function(image_df, site_name, base_landsat_dir, data_source =
   unlink(list.files(tempdir(), full.names = TRUE))
 }
 
+
+# Internal Function: STAC datetime interval in full RFC 3339 format
+# (date-only strings like "2021-01-01/2021-12-31" are rejected by the
+# Planetary Computer API with "Invalid RFC3339 datetime")
+stac_datetime <- function(start_date, end_date) {
+  paste0(format(as.Date(start_date), "%Y-%m-%d"), "T00:00:00Z/",
+         format(as.Date(end_date), "%Y-%m-%d"), "T23:59:59Z")
+}
 
 # Internal Function to Create a Base URL with Microsoft Planetary Computer
 make_vsicurl_url_dem <- function(base_url) {
