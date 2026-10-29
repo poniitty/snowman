@@ -269,7 +269,7 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_dates, site_name,
   it_obj <- s_obj %>%
     stac_search(collections = "sentinel-2-l2a",
                 bbox     = st_bbox(aoi %>% st_transform(4326)),
-                datetime = paste0(start_date, "/", end_date),
+                datetime = stac_datetime(start_date, end_date),
                 limit    = 1000) %>%
     get_request()
 
@@ -282,14 +282,14 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_dates, site_name,
     it_obj <- s_obj %>%
       stac_search(collections = "sentinel-2-l2a",
                   bbox     = st_bbox(aoi %>% st_transform(4326)),
-                  datetime = paste0(min(dr[[1]]$date), "/", max(dr[[1]]$date)),
+                  datetime = stac_datetime(min(dr[[1]]$date), max(dr[[1]]$date)),
                   limit    = 1000) %>% get_request()
 
     for (i in 2:length(dr)) {
       it_obj2 <- s_obj %>%
         stac_search(collections = "sentinel-2-l2a",
                     bbox     = st_bbox(aoi %>% st_transform(4326)),
-                    datetime = paste0(min(dr[[i]]$date), "/", max(dr[[i]]$date)),
+                    datetime = stac_datetime(min(dr[[i]]$date), max(dr[[i]]$date)),
                     limit    = 1000) %>% get_request()
       it_obj$features <- c(it_obj$features, it_obj2$features)
     }
