@@ -269,7 +269,7 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_dates, site_name,
   it_obj <- s_obj %>%
     stac_search(collections = "sentinel-2-l2a",
                 bbox     = st_bbox(aoi %>% st_transform(4326)),
-                datetime = paste0(start_date, "/", end_date),
+                datetime = stac_datetime(start_date, end_date),
                 limit    = 1000) %>%
     get_request()
 
@@ -282,14 +282,14 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_dates, site_name,
     it_obj <- s_obj %>%
       stac_search(collections = "sentinel-2-l2a",
                   bbox     = st_bbox(aoi %>% st_transform(4326)),
-                  datetime = paste0(min(dr[[1]]$date), "/", max(dr[[1]]$date)),
+                  datetime = stac_datetime(min(dr[[1]]$date), max(dr[[1]]$date)),
                   limit    = 1000) %>% get_request()
 
     for (i in 2:length(dr)) {
       it_obj2 <- s_obj %>%
         stac_search(collections = "sentinel-2-l2a",
                     bbox     = st_bbox(aoi %>% st_transform(4326)),
-                    datetime = paste0(min(dr[[i]]$date), "/", max(dr[[i]]$date)),
+                    datetime = stac_datetime(min(dr[[i]]$date), max(dr[[i]]$date)),
                     limit    = 1000) %>% get_request()
       it_obj$features <- c(it_obj$features, it_obj2$features)
     }
@@ -522,8 +522,6 @@ process_feature_s2 <- function(ft, area_sentinel2_dir, aoi, exte, reso) {
 #   9  = Cloud high probability
 #   10 = Thin cirrus
 calc_coverages_s2 <- function(image, image_dir) {
-  require(terra)
-  require(dplyr)
 
   fpath <- file.path(image_dir, image)
 
@@ -538,8 +536,8 @@ calc_coverages_s2 <- function(image, image_dir) {
 
     # 1. Fill Proportion: pixels where B04 == 0 indicate no-data fill areas.
     #    (Mirrors the Landsat approach of checking band 4 for zero values.)
-    fill_tab      <- terra::freq(rs[["B04"]], value = 0)
-    fill_count    <- if (nrow(fill_tab) > 0) fill_tab[1, "count"] else 0
+    #    Images are written with NAflag = 0, so fill pixels are read back as NA.
+    fill_count    <- sum(is.na(terra::values(rs[["B04"]], mat = FALSE)))
     fill_prop_val <- fill_count / n_pixels
 
     # 2. Cloud Proportion via SCL integer classes.

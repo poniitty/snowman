@@ -75,6 +75,14 @@ extract_landsat <- function(aoi,
   }
   # --- END OF SETUP ---
   
+  # Restore the user's global sf and terra settings when the function exits
+  old_s2 <- sf::sf_use_s2()
+  on.exit(suppressMessages(sf::sf_use_s2(old_s2)), add = TRUE)
+  old_terra_tmp <- tryCatch(terra::terraOptions(print = FALSE)$tempdir, error = function(e) NULL)
+  if (!is.null(old_terra_tmp)) {
+    on.exit(terra::terraOptions(tempdir = old_terra_tmp), add = TRUE)
+  }
+  
   # --- 2. INPUT VALIDATION & GEOMETRY FIX ---
   utmall <- utm_zones
   
@@ -232,8 +240,8 @@ extract_landsat <- function(aoi,
         rs <- mosaic(rs) %>% round()
         writeRaster(rs, file.path(area_landsat_dir, lss_dd$file[[1]]),
                     overwrite = TRUE, datatype = "INT2U")
-        unlink(file.path(area_landsat_dir, lss_dd$file[[2:nrow(lss_dd)]]))
-        lss <- lss %>% filter(!file %in% lss_dd$file[[2:nrow(lss_dd)]])
+        unlink(file.path(area_landsat_dir, lss_dd$file[2:nrow(lss_dd)]))
+        lss <- lss %>% filter(!file %in% lss_dd$file[2:nrow(lss_dd)])
       }
     }
     
@@ -291,7 +299,7 @@ extract_landsat_stac <- function(aoi, epsg, excl_dates, site_name,
   it_obj <- s_obj %>%
     stac_search(collections = "landsat-c2-l2",
                 bbox = st_bbox(aoi %>% st_transform(4326)),
-                datetime = paste0(start_date, "/", end_date),
+                datetime = stac_datetime(start_date, end_date),
                 limit = 1000) %>%
     get_request()
   
@@ -305,14 +313,14 @@ extract_landsat_stac <- function(aoi, epsg, excl_dates, site_name,
     it_obj <- s_obj %>%
       stac_search(collections = "landsat-c2-l2",
                   bbox = st_bbox(aoi %>% st_transform(4326)),
-                  datetime = paste0(min(dr[[1]]$date), "/", max(dr[[1]]$date)),
+                  datetime = stac_datetime(min(dr[[1]]$date), max(dr[[1]]$date)),
                   limit = 1000) %>% get_request()
     
     for (i in 2:length(dr)) {
       it_obj2 <- s_obj %>%
         stac_search(collections = "landsat-c2-l2",
                     bbox = st_bbox(aoi %>% st_transform(4326)),
-                    datetime = paste0(min(dr[[i]]$date), "/", max(dr[[i]]$date)),
+                    datetime = stac_datetime(min(dr[[i]]$date), max(dr[[i]]$date)),
                     limit = 1000) %>% get_request()
       it_obj$features <- c(it_obj$features, it_obj2$features)
     }
@@ -349,8 +357,12 @@ extract_landsat_stac <- function(aoi, epsg, excl_dates, site_name,
           sf::sf_use_s2(FALSE) # GEOMETRY FIX
           tt <- lapply(tt, function(x) {
             if (nrow(x) > 1) {
-              if (diff(x %>% pull(area)) == 0) {
+              if (length(unique(x$area)) == 1) {
                 x <- x %>% slice(1)
+              } else if (nrow(x) > 2) {
+                # More than two scenes: keep all, they are merged later in
+                # the same-date mosaicking step
+                x <- x
               } else {
                 stint <- st_intersection(x) %>% st_make_valid() %>% slice(2) %>% st_area %>% as.numeric()
                 x <- x %>% filter(area > stint / (1000 * 1000) + 1)
@@ -541,8 +553,6 @@ check_raster <- function(image, image_dir){
 
 # Internal Function to calculate cloud cover within the rasters
 calc_coverages <- function(image, image_dir){
-  require(terra)
-  require(dplyr)
   
   fpath <- file.path(image_dir, image)
   
@@ -553,11 +563,11 @@ calc_coverages <- function(image, image_dir){
     qa_band_name <- names(rs)[grepl("_pixel", names(rs), ignore.case = TRUE)]
     if(length(qa_band_name) == 0) stop("QA band not found")
     
-    # 1. Fill Proportion (Using C++ internal freq)
-    # We check band 4 (often the first SR band in your stack) for 0 values
-    fill_tab <- terra::freq(rs[[4]], value = 0)
-    fill_count <- if(nrow(fill_tab) > 0) fill_tab[1, "count"] else 0
+    # 1. Fill Proportion
+    # Images are written with NAflag = 0, so fill pixels are read back as NA
+    # (not 0). Count the NAs in band 4 (a surface reflectance band).
     n_pixels <- terra::ncell(rs)
+    fill_count <- sum(is.na(terra::values(rs[[4]], mat = FALSE)))
     fill_prop_val <- fill_count / n_pixels
     
     # 2. Cloud Proportion (Optimized Bitwise)

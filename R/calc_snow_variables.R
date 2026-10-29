@@ -8,6 +8,8 @@
 #' @param base_landsat_dir A character string representing the base directory for Landsat imagery.
 #' @param workers A numeric value representing the number of workers for parallel processing. 
 #' Setting workers > 1 (default) enables parallel computing across multiple nodes.
+#' @param chunk_cells Approximate number of pixels processed at a time. Lower values
+#' reduce memory use (memory scales with chunk_cells x number of images).
 #' @return A SpatRaster object containing the snow variables.
 #' @examples
 #' \dontrun{
@@ -61,7 +63,8 @@
 #' }
 #' @export
 #' @import dplyr sf terra lubridate stringr parallel tibble mgcv purrr tidyr zoo
-calc_snow_variables <- function(image_df, site_name, base_landsat_dir, workers = 1) {
+calc_snow_variables <- function(image_df, site_name, base_landsat_dir, workers = 1,
+                                chunk_cells = 20000) {
   # Define directories for classifications and predictors
   class_landsat_dir <- paste0(base_landsat_dir, "/", site_name, "/classifications")
   predictor_dir <- paste0(base_landsat_dir, "/", site_name, "/predictors")
@@ -73,173 +76,176 @@ calc_snow_variables <- function(image_df, site_name, base_landsat_dir, workers =
   image_df <- image_df %>%
     filter(file %in% class_tifs)
   
+  if (nrow(image_df) == 0) {
+    message("No classified images found! Snow variables not calculated.")
+    return(NULL)
+  }
+  
   ########################################################################
   # Calculate class stats
   
-  if (nrow(image_df) > 0) {
-    # Initialize new columns for snow proportions
-    image_df <- image_df %>%
-      mutate(
-        cloud_proportion_own = as.numeric(NA),
-        clear_proportion_own = as.numeric(NA),
-        land_proportion_own = as.numeric(NA),
-        snow_proportion_own = as.numeric(NA)
-      )
+  # Initialize new columns for snow proportions
+  image_df <- image_df %>%
+    mutate(
+      cloud_proportion_own = as.numeric(NA),
+      clear_proportion_own = as.numeric(NA),
+      land_proportion_own = as.numeric(NA),
+      snow_proportion_own = as.numeric(NA)
+    )
+  
+  # Calculate snow proportions for each image
+  for (imageid in image_df %>% pull(file)) {
+    r <- rast(paste0(class_landsat_dir, "/", imageid))
+    vr2 <- values(r[[1]], mat = FALSE)
     
-    # Calculate snow proportions for each image
-    for (imageid in image_df %>% pull(file)) {
-      r <- rast(paste0(class_landsat_dir, "/", imageid))
-      vr2 <- values(r[[1]], mat = FALSE)
-      
-      image_df[image_df$file == imageid, "cloud_proportion_own"] <- round(mean(vr2 == 4, na.rm = TRUE), 3)
-      image_df[image_df$file == imageid, "clear_proportion_own"] <- round(mean(vr2 < 4, na.rm = TRUE), 3)
-      image_df[image_df$file == imageid, "land_proportion_own"] <- round(mean(vr2 == 1, na.rm = TRUE), 3)
-      image_df[image_df$file == imageid, "snow_proportion_own"] <- round(mean(vr2 == 3, na.rm = TRUE), 3)
-    }
+    image_df[image_df$file == imageid, "cloud_proportion_own"] <- round(mean(vr2 == 4, na.rm = TRUE), 3)
+    image_df[image_df$file == imageid, "clear_proportion_own"] <- round(mean(vr2 < 4, na.rm = TRUE), 3)
+    image_df[image_df$file == imageid, "land_proportion_own"] <- round(mean(vr2 == 1, na.rm = TRUE), 3)
+    image_df[image_df$file == imageid, "snow_proportion_own"] <- round(mean(vr2 == 3, na.rm = TRUE), 3)
   }
   
   # Filter out mostly cloudy images
   image_df <- image_df %>%
     filter(cloud_proportion_own < 0.80)
   
-  if (nrow(image_df) >= 50) {
-    # # Fit a generalized additive model (GAM) to predict snow proportion
-    # image_df %>%
-    #   filter(clear_proportion_own > 0.8 & fill_proportion < 0.2) %>%
-    #   mutate(doy = yday(date)) %>%
-    #   gam(snow_proportion_own ~ s(doy, bs = "cc"), data = ., knots = list(doy = c(1, 365)), family = "binomial") -> gmod
-    # 
-    # # Create a prediction data frame
-    # preds <- tibble(doy = 1:365)
-    # preds$preds <- predict(gmod, preds, type = "response")
-    # 
-    # # Determine the day of the year with the maximum snow proportion
-    # maxsnowdoy <- preds$doy[which.max(preds$preds)]
-    # maxsnowdoy <- ifelse(maxsnowdoy > 250, 30, maxsnowdoy)
-    # maxsnowdoy <- ifelse(maxsnowdoy < (image_df %>% mutate(doy = yday(date)) %>% pull(doy) %>% min) + 14,
-    #                      (image_df %>% mutate(doy = yday(date)) %>% pull(doy) %>% min) + 14, maxsnowdoy)
-    # minsnowdoy <- preds$doy[which.min(preds$preds)]
-    
-    # Read the classified rasters
-    rs <- read_classifications(image_df, class_landsat_dir)
-    
-    # Raster list to data frame
-    mm <- rs %>%
-      map(nosnow_values) %>%
-      bind_rows
-    
-    rtemp <- rs[[1]][[1]]
-    
-    # Add day of the year and year to the data frame
-    mm$doy <- rep(yday(ymd(unlist(lapply(names(rs), function(x) str_split(x, "_")[[1]][4])))),
-                  each = ncell(rs[[1]]))
-    mm$year <- rep(year(ymd(unlist(lapply(names(rs), function(x) str_split(x, "_")[[1]][4])))),
-                   each = ncell(rs[[1]]))
-    mm$week <- rep(week(ymd(unlist(lapply(names(rs), function(x) str_split(x, "_")[[1]][4])))),
-                   each = ncell(rs[[1]]))
-    mm$month <- rep(month(ymd(unlist(lapply(names(rs), function(x) str_split(x, "_")[[1]][4])))),
-                    each = ncell(rs[[1]]))
-    
-    mm <- mm %>%
-      mutate(week = ifelse(week > 52, 52, week))
-    
-    # Create a data frame with the middle day of the year for each month
-    middoys <- tibble(date = seq.Date(as.Date("2022-01-01"), as.Date("2022-12-31"), 1)) %>%
-      mutate(month = month(date),
-             doy = yday(date)) %>%
-      group_by(month) %>%
-      summarise(ndays = n(),
-                middoy = mean(doy))
-    
-    # Count the number of images per month
-    mcs <- image_df %>%
-      mutate(month = month(date)) %>%
-      group_by(month) %>%
-      count
-    
-    # Create a data frame with extra days if needed
-    if (nrow(mcs) != 12) {
-      extradf <- middoys %>%
-        filter(!month %in% mcs$month) %>%
-        mutate(doy = round(middoy),
-               snow = 1,
-               prop = 80) %>%
-        select(snow, prop, doy, month) %>%
-        sample_n(size = mean(mcs$n) * nrow(.), replace = TRUE)
-    } else {
-      extradf <- NULL
-    }
-    
-    # Clean up and return the results
-    rm(rs)
-    gc()
-    
-    # Calculate snow melting day and trend
-    os <- Sys.info()["sysname"]
-    
-    options(show.error.messages = FALSE)
-    if (os == "Windows") {
-      # Use parLapply on Windows
-      cl <- makeCluster(workers)
-      on.exit(stopCluster(cl))
-      
-      # Load required packages on each worker node
-      clusterEvalQ(cl, {
-        library(mgcv)
-      })
-      
-      results <- parLapply(cl, mm %>%
-                          mutate(cell2 = cell) %>%
-                          tidyr::nest(data = -cell2) %>%
-                          pull(data),
-                        cal_scd, extradf = extradf)
-    } else {
-      # Use mclapply on unix
-      results <- mclapply(mm %>%
-                            mutate(cell2 = cell) %>%
-                            nest(data = -cell2) %>%
-                            pull(data),
-                          cal_scd, mc.cores = workers, extradf = extradf)
-    }
-    options(show.error.messages = TRUE)
-    
-    results <- bind_rows(results) %>%
-      mutate(melt = ifelse(melt > 365, melt - 365, melt),
-             ns = ifelse(ns > 365, ns - 365, ns))
-    
-    gc()
-    
-    # Combine the results into a SpatRaster object
-    rs <- lapply(names(results)[-1], function(x) {
-      rtemp[] <- results %>% pull(x)
-      names(rtemp) <- x
-      return(rtemp)
-    })
-    
-    rs <- rast(rs)
-    
-    # Add ESA Land Cover, DEM and NDVI
-    esalc <- rast(paste0(predictor_dir, "/ESALC.tif")) / 10
-    esalc <- aggregate(esalc, 3, getmode)
-    rs[["esalc"]] <- project(esalc, rs, method = "near")
-    
-    dem <- rast(paste0(predictor_dir, "/ALOSDEM.tif"))
-    rs[["elevation"]] <- project(dem, rs)
-    
-    mi <- rast(paste0(predictor_dir, "/medianindices.tif"))
-    rs[["ndvi"]] <- project(mi$ndvi, rs)
-    
-  } else {
+  if (nrow(image_df) < 50) {
     print("Less than 50 individual images! Snow variables not calculated.")
-    rs <- NULL
+    return(NULL)
   }
+  
+  # Create a data frame with the middle day of the year for each month
+  middoys <- tibble(date = seq.Date(as.Date("2022-01-01"), as.Date("2022-12-31"), 1)) %>%
+    mutate(month = month(date),
+           doy = yday(date)) %>%
+    group_by(month) %>%
+    summarise(ndays = n(),
+              middoy = mean(doy))
+  
+  # Count the number of images per month
+  mcs <- image_df %>%
+    mutate(month = month(date)) %>%
+    group_by(month) %>%
+    count
+  
+  # Create a data frame with extra days if needed
+  if (nrow(mcs) != 12) {
+    extradf <- middoys %>%
+      filter(!month %in% mcs$month) %>%
+      mutate(doy = round(middoy),
+             snow = 1,
+             prop = 80) %>%
+      select(snow, prop, doy, month) %>%
+      sample_n(size = mean(mcs$n) * nrow(.), replace = TRUE)
+  } else {
+    extradf <- NULL
+  }
+  
+  ########################################################################
+  # Write the per-image snow / no-snow probabilities to temporary files,
+  # so that all images do not need to be held in memory at once
+  tmp_dir <- file.path(base_landsat_dir, site_name, "tmp_snowvars")
+  if (dir.exists(tmp_dir)) unlink(tmp_dir, recursive = TRUE)
+  dir.create(tmp_dir, recursive = TRUE)
+  on.exit(unlink(tmp_dir, recursive = TRUE), add = TRUE)
+  
+  prob_files <- read_classifications(image_df, class_landsat_dir, tmp_dir)
+  
+  st <- rast(prob_files)
+  nosnow_st <- st[[seq(1, nlyr(st), by = 2)]]
+  snow_st <- st[[seq(2, nlyr(st), by = 2)]]
+  rtemp <- rast(st[[1]]) # empty template with the image geometry
+  
+  img_dates <- ymd(str_split_i(image_df$file, "_", 4))
+  doys <- yday(img_dates)
+  years <- year(img_dates)
+  
+  # Parallel backend
+  os <- Sys.info()["sysname"]
+  cl <- NULL
+  if (os == "Windows" && workers > 1) {
+    cl <- makeCluster(workers)
+    on.exit(stopCluster(cl), add = TRUE)
+    clusterEvalQ(cl, {
+      library(mgcv)
+    })
+  }
+  
+  ########################################################################
+  # Calculate snow melting day etc. in chunks of raster rows
+  rows_per_chunk <- max(1, floor(chunk_cells / ncol(rtemp)))
+  row_starts <- seq(1, nrow(rtemp), by = rows_per_chunk)
+  res_list <- vector("list", length(row_starts))
+  
+  for (i in seq_along(row_starts)) {
+    nr <- min(rows_per_chunk, nrow(rtemp) - row_starts[i] + 1)
+    v_nosnow <- terra::values(nosnow_st, row = row_starts[i], nrows = nr, mat = TRUE)
+    v_snow <- terra::values(snow_st, row = row_starts[i], nrows = nr, mat = TRUE)
+    first_cell <- terra::cellFromRowCol(rtemp, row_starts[i], 1)
+    cells <- first_cell + seq_len(nrow(v_nosnow)) - 1
+    
+    jobs <- lapply(seq_along(cells), function(j) {
+      list(cell = cells[j], nosnow_prop = v_nosnow[j, ], snow_prop = v_snow[j, ])
+    })
+    rm(v_nosnow, v_snow)
+    
+    if (!is.null(cl)) {
+      res <- parLapply(cl, jobs, cal_scd, doys = doys, years = years, extradf = extradf)
+    } else if (workers > 1) {
+      res <- mclapply(jobs, cal_scd, doys = doys, years = years, extradf = extradf,
+                      mc.cores = workers)
+    } else {
+      res <- lapply(jobs, cal_scd, doys = doys, years = years, extradf = extradf)
+    }
+    
+    failed <- vapply(res, function(x) !is.data.frame(x), logical(1))
+    if (any(failed)) {
+      stop("Snow variable calculation failed for some pixels: ",
+           paste(unique(unlist(lapply(res[failed], as.character))), collapse = "; "))
+    }
+    res_list[[i]] <- bind_rows(res)
+    rm(jobs, res)
+  }
+  
+  results <- bind_rows(res_list) %>%
+    arrange(cell) %>%
+    mutate(melt = ifelse(melt > 365, melt - 365, melt),
+           ns = ifelse(ns > 365, ns - 365, ns))
+  
+  gc()
+  
+  # Combine the results into a SpatRaster object
+  rs <- lapply(names(results)[-1], function(x) {
+    r1 <- rtemp
+    r1 <- terra::setValues(r1, as.numeric(results[[x]]))
+    names(r1) <- x
+    return(r1)
+  })
+  
+  rs <- rast(rs)
+  
+  # Add ESA Land Cover, DEM and NDVI
+  esalc <- rast(paste0(predictor_dir, "/ESALC.tif")) / 10
+  esalc <- aggregate(esalc, 3, getmode)
+  rs[["esalc"]] <- project(esalc, rs, method = "near")
+  
+  dem <- rast(paste0(predictor_dir, "/ALOSDEM.tif"))
+  rs[["elevation"]] <- project(dem, rs)
+  
+  mi <- rast(paste0(predictor_dir, "/medianindices.tif"))
+  rs[["ndvi"]] <- project(mi$ndvi, rs)
+  
+  # Bring the result into memory before the temporary files are deleted
+  rs <- rs * 1
   
   return(rs)
 }
 
-# Internal Function to Read Classifications
-read_classifications <- function(imagedf, basedir) {
-  rs <- lapply(imagedf$file, function(x) {
+# Internal Function to Read Classifications.
+# Writes a two-layer file (nosnow, snow probabilities) per image into tmp_dir
+# and returns the file paths in the same order as imagedf$file.
+read_classifications <- function(imagedf, basedir, tmp_dir) {
+  vapply(seq_along(imagedf$file), function(i) {
+    x <- imagedf$file[[i]]
     r <- rast(paste0(basedir, "/", x))
     
     cloudm <- r[["class"]]
@@ -255,24 +261,27 @@ read_classifications <- function(imagedf, basedir) {
     rs <- c(nosnow, snow)
     names(rs) <- c("nosnow", "snow")
     
-    return(rs)
-  })
-  
-  names(rs) <- imagedf$file
-  return(rs)
+    out <- file.path(tmp_dir, sprintf("probs_%05d.tif", i))
+    writeRaster(rs, out, datatype = "INT1U", overwrite = TRUE)
+    return(out)
+  }, character(1))
 }
 
-# Internal Function to Calculate Snow Melting Day and Trend
-cal_scd <- function(d_all, extradf) {
-  # d_all <- mm %>% mutate(cell2 = cell) %>% nest(data = -cell2) %>% slice(1) %>% pull(data)
-  # d_all <- d_all[[1]]
+# Internal Function to Calculate Snow Melting Day and Trend for one pixel.
+# x: list(cell, nosnow_prop, snow_prop), the last two are vectors over images
+cal_scd <- function(x, doys, years, extradf) {
+  ok_n <- !is.na(x$nosnow_prop)
+  ok_s <- !is.na(x$snow_prop)
   
-  d_clean <- rbind(setNames(d_all[,c("nosnow","nosnow_prop","doy","year")],c("snow","prop","doy","year")),
-                   setNames(d_all[,c("snow","snow_prop","doy","year")],c("snow","prop","doy","year")))
-  d_clean <- d_clean[!(is.na(d_clean$snow) | is.na(d_clean$prop)),]
+  d_clean <- data.frame(
+    snow = c(rep(0, sum(ok_n)), rep(1, sum(ok_s))),
+    prop = c(x$nosnow_prop[ok_n], x$snow_prop[ok_s]),
+    doy = c(doys[ok_n], doys[ok_s]),
+    year = c(years[ok_n], years[ok_s])
+  )
   
   results <- list(
-    cell = d_all$cell[1], nobs = length(unique(d_clean$doy + (d_clean$year * 1000))),
+    cell = x$cell, nobs = length(unique(d_clean$doy + (d_clean$year * 1000))),
     nyears = length(unique(d_clean$year)), gamr2 = NA, 
     max_snow_doy = NA, min_snow_doy = NA, max_snow_prop = NA, min_snow_prop = NA,
     scd_raw = NA, snow_days = NA, scd = NA, melt = NA, ns = NA
@@ -280,20 +289,28 @@ cal_scd <- function(d_all, extradf) {
   
   if (results$nobs > 20) {
     
+    d_clean <- d_clean[, c("snow", "prop", "doy")]
     if (!is.null(extradf)) {
-      d_clean <- rbind(extradf[, c("snow", "prop", "doy")], d_clean[,-4])
+      d_clean <- rbind(as.data.frame(extradf[, c("snow", "prop", "doy")]), d_clean)
     }
     
     results$scd_raw <- round(weighted.mean(d_clean$snow, d_clean$prop) * 365, 1)
     
     if ((results$scd_raw / 365) > 0.02 & (results$scd_raw / 365) < 0.98 & !is.nan(results$scd_raw)) {
       
+      # Class probabilities (%) are used as observation weights on a 0-1
+      # scale. With binomial family the weights are interpreted as numbers of
+      # trials, so the raw 20-100 values would inflate the information content.
+      d_clean$w <- d_clean$prop / 100
+      
       e <- try({
-        gammod <- gam(snow ~ s(doy, bs = "cc", k = 5),
-                      knots = list(doy = c(1, 365)),
-                      data = d_clean, family = "binomial", weights = prop, method = "REML",
-                      control = list(epsilon = 1e-04,  # Lower precision (default is 1e-07)
-                                     maxit = 50))
+        suppressWarnings({ # non-integer successes warning from fractional weights
+          gammod <- gam(snow ~ s(doy, bs = "cc", k = 5),
+                        knots = list(doy = c(1, 365)),
+                        data = d_clean, family = "binomial", weights = w, method = "REML",
+                        control = list(epsilon = 1e-04,  # Lower precision (default is 1e-07)
+                                       maxit = 50))
+        })
       }, silent = TRUE)
       
       if (!inherits(e, "try-error")) {
@@ -335,21 +352,4 @@ cal_scd <- function(d_all, extradf) {
   }
   
   return(as.data.frame(results))
-}
-
-# Internal Function to Prepare No-Snow Values
-# x <- rs[[1]]
-nosnow_values <- function(x) {
-  r <- x
-  x[["nosnow"]][!is.na(x[["nosnow"]])] <- 0
-  x[["snow"]][!is.na(x[["snow"]])] <- 1
-  v_mat <- values(c(x, r), mat = TRUE) 
-  
-  tibble::tibble(
-    cell = 1:nrow(v_mat), # Assuming all rasters have same extent/cell count
-    nosnow = v_mat[, 1], # nosnow from original
-    snow = v_mat[, 2],    # snow from original
-    nosnow_prop = v_mat[, 3], # nosnow from original
-    snow_prop = v_mat[, 4]    # snow from original
-  )
 }
