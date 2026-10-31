@@ -12,7 +12,7 @@ Before you start, make sure you have the `snowman` package installed. You can in
 
 ```r
 # Install the snowman package from GitHub
-devtools::install_github("poniitty/snowman")
+pak::pak("poniitty/snowman")
 ```
 ❗**Note!** Keep the dependent packages and R updated! Older versions have caused problems with the parallelization.❗
 
