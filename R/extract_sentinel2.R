@@ -404,15 +404,20 @@ process_features_in_parallel_s2 <- function(it_obj, area_sentinel2_dir, aoi, wor
   # Build grid template from a feature whose native EPSG matches the target.
   # Use B04 (red, 10 m) as the template band — it is always present in L2A
   # and defines the finest native resolution we want for the output stack.
-  idx <- which(sapply(it_obj$features, function(x) x$properties$`proj:epsg`) == epsg)
-  if (length(idx) == 0) idx <- 1 else idx <- idx[1]
-
-  item_temp <- it_obj$features[[idx]]
-  tmp_url   <- make_vsicurl_url_s2(rstac::assets_url(item_temp)[["B04"]])
-
-  r_temp    <- terra::crop(terra::rast(tmp_url), aoi %>% sf::st_transform(crs = epsg))
-  exte_vals <- as.numeric(sf::st_bbox(r_temp))[c(1, 3, 2, 4)]
-  reso_val  <- terra::res(r_temp)[1]   # 10 m; coarser bands resampled to match
+  # The extent comes from the AOI itself (not from one tile, which may cover
+  # only part of the AOI); only the pixel alignment is taken from a tile.
+  reso_val    <- 10
+  grid_origin <- c(0, 0) # Sentinel-2 UTM grid: pixel corners at 10 m multiples
+  idx <- which(vapply(it_obj$features, item_epsg, numeric(1)) == epsg)
+  if (length(idx) > 0) {
+    tmp_url <- make_vsicurl_url_s2(rstac::assets_url(it_obj$features[[idx[1]]])[["B04"]])
+    r_scene <- try(terra::rast(tmp_url), silent = TRUE)
+    if (!inherits(r_scene, "try-error")) {
+      grid_origin <- terra::origin(r_scene)
+      reso_val    <- terra::res(r_scene)[1]
+    }
+  }
+  exte_vals <- aoi_grid_extent(aoi, epsg, reso_val, grid_origin)
 
   future.apply::future_lapply(
     it_obj$features,

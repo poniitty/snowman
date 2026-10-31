@@ -427,18 +427,23 @@ extract_landsat_stac <- function(aoi, epsg, excl_dates, site_name,
 #' Internal Function: Parallel Feature Processing with Grid Alignment
 process_features_in_parallel <- function(it_obj, area_landsat_dir, aoi, workers, epsg) {
   
-  # 1. Create a Grid Template from one valid feature to ensure alignment
-  # We pick the first feature that matches the target epsg
-  idx <- which(sapply(it_obj$features, function(x) x$properties$`proj:epsg`) == epsg)
-  if(length(idx) == 0) idx <- 1 else idx <- idx[1]
-  
-  item_temp <- it_obj$features[[idx]]
-  tmp_url <- make_vsicurl_url(rstac::assets_url(item_temp)[[1]])
-  
-  # Create numerical template for workers to avoid passing full SpatRaster objects
-  r_temp <- terra::crop(terra::rast(tmp_url), aoi %>% sf::st_transform(crs = epsg))
-  exte_vals <- as.numeric(sf::st_bbox(r_temp))[c(1,3,2,4)]
-  reso_val <- terra::res(r_temp)[1]
+  # 1. Grid template: the extent comes from the AOI itself, and only the
+  # pixel alignment (origin) is taken from a scene in the target UTM zone.
+  # (Earlier the extent was the AOI cropped to one scene, so if that scene
+  # covered only part of the AOI, e.g. a neighbouring WRS row, every image
+  # got the truncated extent.)
+  reso_val <- 30
+  grid_origin <- c(15, 15) # Landsat C2 UTM grid: pixel corners at 15 m offsets
+  idx <- which(vapply(it_obj$features, item_epsg, numeric(1)) == epsg)
+  if (length(idx) > 0) {
+    tmp_url <- make_vsicurl_url(rstac::assets_url(it_obj$features[[idx[1]]])[[1]])
+    r_scene <- try(terra::rast(tmp_url), silent = TRUE)
+    if (!inherits(r_scene, "try-error")) {
+      grid_origin <- terra::origin(r_scene)
+      reso_val <- terra::res(r_scene)[1]
+    }
+  }
+  exte_vals <- aoi_grid_extent(aoi, epsg, reso_val, grid_origin)
   
   # 2. Parallel Processing with future_lapply
   # Note: workers is ignored here because plan is set in extract_landsat
@@ -454,6 +459,25 @@ process_features_in_parallel <- function(it_obj, area_landsat_dir, aoi, workers,
     future.scheduling = 10,
     future.globals = c("make_vsicurl_url")
   )
+}
+
+# Internal Function: EPSG code of a STAC item. Works with both the old
+# 'proj:epsg' (projection extension v1) and the newer 'proj:code' ("EPSG:32634").
+item_epsg <- function(x) {
+  p <- x$properties
+  if (!is.null(p$`proj:epsg`)) return(as.numeric(p$`proj:epsg`))
+  if (!is.null(p$`proj:code`)) return(as.numeric(sub("^EPSG:", "", p$`proj:code`)))
+  NA_real_
+}
+
+# Internal Function: AOI bounding box in the target CRS, snapped outwards to
+# the satellite pixel grid. Returns c(xmin, xmax, ymin, ymax).
+aoi_grid_extent <- function(aoi, epsg, reso, origin) {
+  bb <- as.numeric(sf::st_bbox(sf::st_transform(aoi, crs = epsg)))
+  snap_down <- function(v, o) floor((v - o) / reso) * reso + o
+  snap_up <- function(v, o) ceiling((v - o) / reso) * reso + o
+  c(snap_down(bb[1], origin[1]), snap_up(bb[3], origin[1]),
+    snap_down(bb[2], origin[2]), snap_up(bb[4], origin[2]))
 }
 
 #' Internal Function: Single Feature Extraction with Retry Logic
