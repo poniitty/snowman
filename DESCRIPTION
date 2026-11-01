@@ -1,7 +1,7 @@
 Package: snowman
 Type: Package
 Title: Calculate Snow Cover Duration Across Landscapes Based on Satellite Imagery
-Version: 0.1.0
+Version: 0.1.0.9000
 Authors@R: 
     person("Pekka", "Niittynen", , "poniitty@gmail.com", role = c("aut", "cre"),
            comment = c(ORCID = "0000-0002-7290-029X"))
@@ -28,6 +28,7 @@ Imports:
     terra,
     tibble,
     readr,
+    stats,
     mgcv,
     purrr,
     tidyr,

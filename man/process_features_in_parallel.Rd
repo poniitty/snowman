@@ -4,7 +4,18 @@
 \alias{process_features_in_parallel}
 \title{Internal Function: Parallel Feature Processing with Grid Alignment}
 \usage{
-process_features_in_parallel(it_obj, area_landsat_dir, aoi, workers, epsg)
+process_features_in_parallel(
+  it_obj,
+  area_landsat_dir,
+  aoi,
+  workers,
+  epsg,
+  max_retries = 5,
+  retry_rounds = 2,
+  retry_wait = 60,
+  http_retries = 10,
+  http_retry_delay = 5
+)
 }
 \description{
 Internal Function: Parallel Feature Processing with Grid Alignment

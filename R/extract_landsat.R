@@ -4,6 +4,20 @@
 #' It processes the area of interest (AOI), transforms coordinates, and downloads
 #' the relevant Landsat scenes.
 #'
+#' Downloads are robust to temporary throttling by the Planetary Computer: GDAL
+#' retries failed HTTP requests (`http_retries`), each scene is attempted up to
+#' `max_retries` times with growing waits, and scenes that still fail are retried
+#' in up to `retry_rounds` further rounds. Every scene's outcome is appended to
+#' `imagery/download_log.csv`; scenes that could not be downloaded are reported
+#' in a warning and attempted again when the function is run again.
+#'
+#' The function can be re-run to update a site (e.g. with a later `end_date`): it
+#' downloads only scenes that are not yet known. Known scenes are images on disk,
+#' scenes listed in `imagery/lss_final.csv` (also if their images have since been
+#' deleted, e.g. after classification) and scenes rejected earlier as too cloudy
+#' (`imagery/lss_rejected.csv`). Only the newly downloaded images are checked and
+#' added to `lss_final.csv`.
+#'
 #' @param aoi An `sf` object or a list containing the area of interest.
 #' @param site_name A character string representing the name of the site.
 #' @param aoi_size A numeric value representing the size of the AOI in kilometers. Ignored if aoi is a POLYGON.
@@ -16,8 +30,15 @@
 #' @param workers A numeric value representing the number of workers for parallel processing.
 #' Setting workers > 1 (default) enables parallel computing.
 #' @param data_source A character string representing the data source (currently only option is "rstac").
-#' @param force Logical, if TRUE deletes all previously downloaded imagery.
-#' @return A tibble containing the metadata of the downloaded Landsat scenes.
+#' @param force Logical, if TRUE deletes all previously downloaded imagery and the scene tables.
+#' @param max_retries Attempts per scene within one round (default 5), with waits of about 5, 10, 20, 40 s.
+#' @param retry_rounds Further rounds for scenes that failed in all their attempts (default 2).
+#' @param retry_wait Pause in seconds before retry round k is `k * retry_wait` (default 60).
+#' @param http_retries,http_retry_delay GDAL's own retries of failed HTTP requests and the initial
+#' delay in seconds (GDAL_HTTP_MAX_RETRY, GDAL_HTTP_RETRY_DELAY).
+#' @return A tibble containing the metadata of all usable Landsat scenes of the site (the content
+#' of `lss_final.csv`), or NULL if there are none. Scenes that could not be downloaded in this run
+#' are in `attr(result, "failed")`.
 #' @export
 #' @import rstac dplyr sf terra lubridate stringr parallel tibble readr ggplot2 future future.apply lwgeom
 extract_landsat <- function(aoi,
@@ -31,50 +52,39 @@ extract_landsat <- function(aoi,
                             base_landsat_dir,
                             workers = 1,
                             data_source = "rstac",
-                            force = FALSE) {
-  
+                            force = FALSE,
+                            max_retries = 5,
+                            retry_rounds = 2,
+                            retry_wait = 60,
+                            http_retries = 10,
+                            http_retry_delay = 5) {
+
   # --- 1. PORTABLE PARALLEL SETUP (Final, Stable Version) ---
   # Check if running inside RStudio/RStudio Server (where multicore is unstable)
   # We use parallelly::supportsMulticore() == FALSE on Linux/Darwin to detect RStudio Server.
   is_rstudio_env <- parallelly::supportsMulticore() == FALSE && Sys.info()['sysname'] %in% c("Linux", "Darwin")
-  
+
   # Determine how many workers are currently running in the active plan.
   current_plan_workers <- future::nbrOfWorkers()
-  
-  # We only set a new plan if:
-  # 1. The user requested parallelism (workers > 1) AND
-  # 2. No parallel workers are currently active (current_plan_workers <= 1).
+
   if (workers > 1 && current_plan_workers <= 1) {
-    
-    # Store the original plan state (which is currently sequential/idle)
-    # We save this so snowman_cleanup() can restore it later.
-    oplan <- future::plan() 
-    
+    oplan <- future::plan()
     os_type <- Sys.info()['sysname']
-    
-    # Decision: Use multisession for stability in RStudio/Windows, multicore for speed elsewhere.
     if (os_type == "Windows" || is_rstudio_env) {
-      # USE MULTISESSION (SOCKETS): Stable for RStudio Server and required for Windows.
       future::plan(future::multisession, workers = workers)
       message(paste("Setting parallel plan to 'multisession' (Sockets) with", workers, "workers for cross-platform stability."))
     } else if (os_type %in% c("Linux", "Darwin")) {
-      # USE MULTICORE (FORKING): Fastest and best for pure Linux terminal/HPC batch environments.
       future::plan(future::multicore, workers = workers)
       message(paste("Setting parallel plan to 'multicore' (Forking) with", workers, "workers."))
     }
-    
     # Note: We rely on the user calling snowman_cleanup() to restore 'oplan'.
-    
   } else if (workers > 1 && current_plan_workers > 1) {
-    # If a plan is already set with workers, reuse it.
     message(paste("Reusing existing parallel plan with", current_plan_workers, "workers."))
   } else {
-    # Default to sequential if workers <= 1.
     future::plan(future::sequential)
-    # message is optional here, but good for debugging if workers=1.
   }
   # --- END OF SETUP ---
-  
+
   # Restore the user's global sf and terra settings when the function exits
   old_s2 <- sf::sf_use_s2()
   on.exit(suppressMessages(sf::sf_use_s2(old_s2)), add = TRUE)
@@ -82,17 +92,17 @@ extract_landsat <- function(aoi,
   if (!is.null(old_terra_tmp)) {
     on.exit(terra::terraOptions(tempdir = old_terra_tmp), add = TRUE)
   }
-  
+
   # --- 2. INPUT VALIDATION & GEOMETRY FIX ---
   utmall <- utm_zones
-  
+
   suppressWarnings({
     suppressMessages({
       sf::sf_use_s2(FALSE)
-      
+
       if (inherits(aoi, "sf")) {
-        aoi <- sf::st_make_valid(aoi) 
-        
+        aoi <- sf::st_make_valid(aoi)
+
         if(st_geometry_type(aoi) == "POINT"){
           aoi_mid <- aoi %>% st_centroid() %>% st_transform(crs = 4326)
         } else if(st_geometry_type(aoi) == "POLYGON"){
@@ -109,167 +119,181 @@ extract_landsat <- function(aoi,
       }
     })
   })
-  
+
   # Coordinate Reference System logic
   suppressMessages({
-    utm <- utmall[aoi_mid,] 
+    utm <- utmall[aoi_mid,]
   })
   if (nrow(utm) == 0) utm <- utmall[st_nearest_feature(aoi_mid, utmall),]
-  
+
   lat <- st_coordinates(aoi_mid)[,"Y"]
   utm$ZONE <- ifelse(nchar(utm$ZONE) == 1, paste0("0", utm$ZONE), utm$ZONE)
   epsg <- as.numeric(ifelse(lat > 0, paste0(326, utm$ZONE), paste0(327, utm$ZONE)))
-  
+
   if (st_geometry_type(aoi) == "POLYGON") {
     aoi <- aoi %>% st_transform(crs = epsg) %>% mutate(name = site_name)
   } else {
-    aoi <- aoi %>% st_transform(crs = epsg) %>% st_buffer(aoi_size * 1000) %>% 
+    aoi <- aoi %>% st_transform(crs = epsg) %>% st_buffer(aoi_size * 1000) %>%
       st_bbox() %>% st_as_sfc() %>% st_as_sf() %>% mutate(name = site_name)
   }
-  
+
   # Guardrail for large AOIs
-  if(as.numeric(st_area(aoi)) > 1000e6) stop("ERROR: AOI > $1000km^2$. Process in blocks.")
-  
+  if(as.numeric(st_area(aoi)) > 1000e6) stop("ERROR: AOI > $1000km^2. Process in blocks.")
+
   # --- 3. DIRECTORY & TERRA SETUP ---
   area_landsat_dir <- file.path(base_landsat_dir, site_name, "imagery")
   if (!dir.exists(area_landsat_dir)) dir.create(area_landsat_dir, recursive = TRUE)
-  
+
   my_temp_dir <- file.path(base_landsat_dir, "temp_terra")
   if(!dir.exists(my_temp_dir)) dir.create(my_temp_dir, recursive = TRUE)
   terra::terraOptions(tempdir = my_temp_dir)
-  
+
   if(force){
     unlink(list.files(area_landsat_dir, pattern = "GMT.tif$", full.names = TRUE))
-    unlink(file.path(area_landsat_dir, c("lss.csv", "lss_final.csv")))
+    unlink(file.path(area_landsat_dir, c("lss.csv", "lss_final.csv", "lss_rejected.csv")))
   }
-  
-  tifs <- list.files(area_landsat_dir, pattern = "GMT.tif$")
-  tif_dates <- if(length(tifs) > 0) {
-    tibble(satid = sapply(str_split(tifs, "_"), `[`, 1),
-           date = as.character(ymd(sapply(str_split(tifs, "_"), `[`, 4))))
-  } else {
-    tibble(satid = NA, date = NA)
-  }
-  
-  # --- 4. EXTRACTION & PARALLEL PROCESSING ---
+  unlink(list.files(area_landsat_dir, pattern = "\\.part$", full.names = TRUE)) # leftovers of interrupted runs
+
+  # Scenes that need no download (see the function description), and the scene
+  # table of earlier runs, to which new scenes are added
+  known <- known_groups(area_landsat_dir, "lss_final.csv", "lss_rejected.csv", sensor = "landsat")
+  final_file <- file.path(area_landsat_dir, "lss_final.csv")
+  prev_final <- if (file.exists(final_file)) {
+    readr::read_csv(final_file, show_col_types = FALSE, col_types = readr::cols(.default = "c"))
+  } else NULL
+
+  # --- 4. SEARCH & DOWNLOAD ---
   if (data_source == "rstac") {
-    lss <- extract_landsat_stac(workers = workers, start_date = start_date, end_date = end_date, months = months,
-                                aoi = aoi, site_name = site_name, epsg = epsg, excl_dates = tif_dates,
-                                sats = sats, area_landsat_dir = area_landsat_dir, minclouds = minclouds)
+    dl <- extract_landsat_stac(workers = workers, start_date = start_date, end_date = end_date, months = months,
+                               aoi = aoi, site_name = site_name, epsg = epsg, excl_groups = known,
+                               sats = sats, area_landsat_dir = area_landsat_dir, minclouds = minclouds,
+                               max_retries = max_retries, retry_rounds = retry_rounds, retry_wait = retry_wait,
+                               http_retries = http_retries, http_retry_delay = http_retry_delay)
   }
   gc()
-  
-  if (is.null(lss)) {
-    lss <- tibble(id = NULL, DATE_ACQUIRED = NULL)
-  } else {
-    lss <- lss %>% mutate(id = as.character(id), DATE_ACQUIRED = as.character(DATE_ACQUIRED))
-  }
-  
+  write_download_log(dl$log, area_landsat_dir)
+  report_downloads(dl$log, length(known), area_landsat_dir)
+  failed <- if (is.null(dl$log)) NULL else dl$log %>% filter(status == "ERROR")
+
+  # lss.csv: catalogue metadata of every downloaded scene (also of those later
+  # rejected), accumulated over runs
+  meta_cols <- c("id", "file", "DATE_ACQUIRED", "CLOUD_COVER", "SUN_ELEVATION")
+  meta <- if (!is.null(dl$meta)) dl$meta %>% mutate(across(everything(), as.character)) else NULL
   if (file.exists(file.path(area_landsat_dir, "lss.csv"))) {
-    existing_lss <- read_csv(file.path(area_landsat_dir, "lss.csv"), show_col_types = FALSE) %>% 
-      mutate(id = as.character(id), DATE_ACQUIRED = as.character(DATE_ACQUIRED))
-    lss <- bind_rows(existing_lss, lss) %>% distinct()
+    old_meta <- readr::read_csv(file.path(area_landsat_dir, "lss.csv"), show_col_types = FALSE,
+                                col_types = readr::cols(.default = "c"))
+    meta <- bind_rows(old_meta[, intersect(meta_cols, names(old_meta))], meta)
   }
-  
-  if (nrow(lss) == 0) {
-    print("Zero Landsat scenes found or downloaded!")
-    return(NULL)
-  } else {
-    write_csv(lss, file.path(area_landsat_dir, "lss.csv"))
-    
-    # Refresh file list
-    tifs <- list.files(area_landsat_dir, pattern = "GMT.tif$")
-    lss <- full_join(tibble(file = tifs), lss, by = join_by(file))
-    
-    # Metadata parsing (optimized apply)
-    lss$area <- site_name
-    lss_parts <- str_split(lss$file, "_")
-    lss$collection <- gsub("0", "C", sapply(lss_parts, `[`, 6))
-    lss$tier <- sapply(lss_parts, `[`, 7)
-    lss$satid <- sapply(lss_parts, `[`, 1)
-    lss$path <- as.numeric(substr(sapply(lss_parts, `[`, 3), 1, 3))
-    lss$row <- as.numeric(substr(sapply(lss_parts, `[`, 3), 4, 6))
-    lss$date <- ymd(sapply(lss_parts, `[`, 4))
-    lss$time <- gsub(".tif", "", sapply(lss_parts, `[`, 8))
-    
-    lss <- lss %>% arrange(date)
-    
-    # --- 5. CHECK RASTERS (FUTURE APPLY) ---
-    # future.scheduling is key to solving the file descriptor error.
-    # It groups tasks into chunks automatically.
-    
-    img_remove <- future.apply::future_lapply(
-      lss$file, 
-      check_raster, 
-      image_dir = area_landsat_dir,
-      future.seed = TRUE,
-      future.packages = c("terra"),
-      future.scheduling = 5 # <--- Creates chunks to rest file descriptors
-    ) %>% unlist()
-    
-    gc()
-    
-    if (length(img_remove) > 0) {
-      unlink(file.path(area_landsat_dir, img_remove))
-      
-      # [Retry logic omitted for brevity, but follows same pattern if re-implemented]
-      # For now, we clean and save what we have
-      lss <- lss %>% filter(!file %in% img_remove)
-      write_csv(lss, file.path(area_landsat_dir, "lss.csv"))
+  if (!is.null(meta) && nrow(meta) > 0) {
+    meta <- meta %>% distinct(file, .keep_all = TRUE)
+    write_csv(meta, file.path(area_landsat_dir, "lss.csv"))
+  }
+
+  # --- 5. NEW IMAGES: on disk but not yet in the final scene table ---
+  tifs <- list.files(area_landsat_dir, pattern = "GMT.tif$")
+  new_files <- setdiff(tifs, prev_final$file)
+  if (length(new_files) == 0) {
+    if (is.null(prev_final)) {
+      print("Zero Landsat scenes found or downloaded!")
+      return(NULL)
     }
-    
-    tifs <- list.files(area_landsat_dir, pattern = "GMT.tif$")
-    lss <- full_join(tibble(file = tifs), lss, by = join_by(file))
-    # ... (Re-run metadata parsing if strictly necessary, or trust filter)
-    lss <- lss %>% arrange(date) %>% filter(!is.na(file))
-    
-    # --- 6. MOSAICKING (Sequential due to I/O intensity) ---
-    lss_d <- lss %>% group_by(date, satid, path) %>% count %>% filter(n > 1) %>% ungroup()
-    if (nrow(lss_d) > 0) {
-      for (ii in seq_len(nrow(lss_d))) {
-        lss_dd <- lss_d %>% slice(ii)
-        lss_dd <- right_join(lss, lss_dd, by = join_by(satid, path, date))
-        
-        rs <- lapply(lss_dd$file, function(x) {
-          r <- rast(file.path(area_landsat_dir, x))
-          r[r == 0] <- NA
-          return(r)
-        })
-        
-        rs <- sprc(rs)
-        rs <- mosaic(rs) %>% round()
-        writeRaster(rs, file.path(area_landsat_dir, lss_dd$file[[1]]),
-                    overwrite = TRUE, datatype = "INT2U")
-        unlink(file.path(area_landsat_dir, lss_dd$file[2:nrow(lss_dd)]))
-        lss <- lss %>% filter(!file %in% lss_dd$file[2:nrow(lss_dd)])
-      }
-    }
-    
-    # --- 7. CALC COVERAGES (FUTURE APPLY) ---
-    lccs <- future.apply::future_lapply(
-      lss$file, 
-      calc_coverages, 
-      image_dir = area_landsat_dir, 
-      future.seed = TRUE,
-      future.packages = c("terra", "dplyr"),
-      future.scheduling = 5 # <--- Chunking again
-    ) %>% bind_rows()
-    
-    gc()
-    
-    lss <- full_join(lss %>% select(-ends_with("proportion")), lccs, by = "file")
-    
-    img_remove <- lss %>% arrange(desc(fill_proportion)) %>%
-      filter(clear_proportion < 0.1) %>% pull(file)
-    
+    out <- readr::type_convert(prev_final, col_types = readr::cols())
+    attr(out, "failed") <- failed
+    return(out)
+  }
+
+  lss <- tibble(file = new_files)
+  if (!is.null(meta)) lss <- left_join(lss, meta[, intersect(meta_cols, names(meta))], by = "file")
+  lss <- parse_landsat_files(lss, site_name)
+
+  # --- 6. CHECK RASTERS (FUTURE APPLY) ---
+  # Unreadable images are deleted; they are not recorded as rejected, so they are
+  # downloaded again on the next run.
+  img_remove <- future.apply::future_lapply(
+    lss$file,
+    check_raster,
+    image_dir = area_landsat_dir,
+    future.seed = TRUE,
+    future.packages = c("terra"),
+    future.scheduling = 5
+  ) %>% unlist()
+  gc()
+  if (length(img_remove) > 0) {
+    message(length(img_remove), " unreadable image(s) deleted; they are downloaded again on the next run")
     unlink(file.path(area_landsat_dir, img_remove))
-    
     lss <- lss %>% filter(!file %in% img_remove)
-    
-    write_csv(lss, file.path(area_landsat_dir, "lss_final.csv"))
-    
-    return(lss)
   }
+
+  # --- 7. MOSAICKING (Sequential due to I/O intensity) ---
+  lss_d <- lss %>% group_by(date, satid, path) %>% count %>% filter(n > 1) %>% ungroup()
+  if (nrow(lss_d) > 0) {
+    for (ii in seq_len(nrow(lss_d))) {
+      lss_dd <- lss_d %>% slice(ii)
+      lss_dd <- right_join(lss, lss_dd, by = join_by(satid, path, date))
+
+      rs <- lapply(lss_dd$file, function(x) {
+        r <- rast(file.path(area_landsat_dir, x))
+        r[r == 0] <- NA
+        return(r)
+      })
+
+      rs <- sprc(rs)
+      rs <- mosaic(rs) %>% round()
+      writeRaster(rs, file.path(area_landsat_dir, lss_dd$file[[1]]),
+                  overwrite = TRUE, datatype = "INT2U")
+      unlink(file.path(area_landsat_dir, lss_dd$file[2:nrow(lss_dd)]))
+      lss <- lss %>% filter(!file %in% lss_dd$file[2:nrow(lss_dd)])
+    }
+  }
+
+  # --- 8. CALC COVERAGES (FUTURE APPLY) ---
+  lccs <- future.apply::future_lapply(
+    lss$file,
+    calc_coverages,
+    image_dir = area_landsat_dir,
+    future.seed = TRUE,
+    future.packages = c("terra", "dplyr"),
+    future.scheduling = 5
+  ) %>% bind_rows()
+  gc()
+
+  lss <- full_join(lss %>% select(-ends_with("proportion")), lccs, by = "file")
+
+  # Mostly cloudy or empty images are deleted and recorded, so they are not downloaded again
+  rejected <- lss %>% filter(!is.na(clear_proportion), clear_proportion < 0.1)
+  if (nrow(rejected) > 0) {
+    unlink(file.path(area_landsat_dir, rejected$file))
+    rej_file <- file.path(area_landsat_dir, "lss_rejected.csv")
+    write_csv(rejected %>% select(file, date, satid, fill_proportion, cloud_proportion, clear_proportion) %>%
+                mutate(across(everything(), as.character)),
+              rej_file, append = file.exists(rej_file))
+  }
+  lss <- lss %>% filter(!file %in% rejected$file)
+
+  # --- 9. FINAL SCENE TABLE: earlier scenes + the new ones ---
+  final <- bind_rows(prev_final, lss %>% mutate(across(everything(), as.character))) %>%
+    distinct(file, .keep_all = TRUE)
+  final <- readr::type_convert(final, col_types = readr::cols()) %>% arrange(date)
+  write_csv(final, final_file)
+  message(nrow(lss), " new scene(s) added; ", nrow(final), " scenes in ", final_file)
+
+  attr(final, "failed") <- failed
+  return(final)
+}
+
+# Internal Function: scene metadata from the image file names
+# (<satid>_<correction>_<pathrow>_<date>_<processing date>_<collection>_<tier>_<time>GMT.tif)
+parse_landsat_files <- function(lss, site_name) {
+  lss$area <- site_name
+  lss_parts <- str_split(lss$file, "_")
+  lss$collection <- gsub("0", "C", sapply(lss_parts, `[`, 6))
+  lss$tier <- sapply(lss_parts, `[`, 7)
+  lss$satid <- sapply(lss_parts, `[`, 1)
+  lss$path <- as.numeric(substr(sapply(lss_parts, `[`, 3), 1, 3))
+  lss$row <- as.numeric(substr(sapply(lss_parts, `[`, 3), 4, 6))
+  lss$date <- ymd(sapply(lss_parts, `[`, 4))
+  lss$time <- gsub(".tif", "", sapply(lss_parts, `[`, 8))
+  lss %>% arrange(date)
 }
 
 # Internal Function to Create a Base URL
@@ -283,155 +307,135 @@ make_vsicurl_url <- function(base_url) {
   )
 }
 
-# Internal Function to Extract Landsat Imagery from STAC
-extract_landsat_stac <- function(aoi, epsg, excl_dates, site_name,
+# Internal Function to Extract Landsat Imagery from STAC.
+# Returns list(meta = metadata of the downloaded scenes, log = outcome per scene).
+extract_landsat_stac <- function(aoi, epsg, excl_groups, site_name,
                                  sats = c("LT04", "LT05", "LE07", "LC08", "LC09"),
                                  start_date, end_date, months = 1:12,
-                                 minclouds, area_landsat_dir, workers) {
-  
-  s_obj <- stac("https://planetarycomputer.microsoft.com/api/stac/v1/")
-  
+                                 minclouds, area_landsat_dir, workers,
+                                 max_retries = 5, retry_rounds = 2, retry_wait = 60,
+                                 http_retries = 10, http_retry_delay = 5) {
+
   # Mapping satellites
   sat_map <- c("LT04"="landsat-4", "LT05"="landsat-5", "LE07"="landsat-7", "LC08"="landsat-8", "LC09"="landsat-9")
   sats2 <- sat_map[sats]
-  
-  # Search logic
-  it_obj <- s_obj %>%
-    stac_search(collections = "landsat-c2-l2",
-                bbox = st_bbox(aoi %>% st_transform(4326)),
-                datetime = stac_datetime(start_date, end_date),
-                limit = 1000) %>%
-    get_request()
-  
-  # Logic to handle > 1000 items pagination manually if needed
-  if (length(it_obj$features) == 1000) {
-    # (Existing pagination logic kept as is)
-    dr <- tibble(date = seq.Date(as.Date(start_date), as.Date(end_date), by = "day")) %>%
-      mutate(gr = cut_number(row_number(.), 20)) %>%
-      group_by(gr) %>% group_split()
-    
-    it_obj <- s_obj %>%
-      stac_search(collections = "landsat-c2-l2",
-                  bbox = st_bbox(aoi %>% st_transform(4326)),
-                  datetime = stac_datetime(min(dr[[1]]$date), max(dr[[1]]$date)),
-                  limit = 1000) %>% get_request()
-    
-    for (i in 2:length(dr)) {
-      it_obj2 <- s_obj %>%
-        stac_search(collections = "landsat-c2-l2",
-                    bbox = st_bbox(aoi %>% st_transform(4326)),
-                    datetime = stac_datetime(min(dr[[i]]$date), max(dr[[i]]$date)),
-                    limit = 1000) %>% get_request()
-      it_obj$features <- c(it_obj$features, it_obj2$features)
-    }
+  short <- setNames(names(sat_map), sat_map)
+
+  # Search (all pages, retried if the API is busy)
+  it_obj <- stac_search_all("landsat-c2-l2", aoi, start_date, end_date)
+
+  # scene group of a catalogue item, in the same form as group_from_file()
+  feat_group <- function(x) {
+    paste(short[[x$properties$platform]],
+          sprintf("%03d", as.integer(x$properties$`landsat:wrs_path`)),
+          gsub("-", "", substr(x$properties$datetime, 1, 10)), sep = "_")
   }
-  
+
   it_obj <- it_obj %>%
     items_filter(filter_fn = function(x) { x$properties$`eo:cloud_cover` < minclouds }) %>%
     items_filter(filter_fn = function(x) { x$properties$platform %in% sats2 }) %>%
     assets_select(asset_names = c("coastal", "blue", "green", "red", "nir08", "swir16", "swir22", "lwir", "lwir11", "qa_pixel", "qa_radsat")) %>%
     items_filter(filter_fn = function(x) { month(ymd_hms(x$properties$datetime)) %in% months }) %>%
-    items_filter(filter_fn = function(x) { !as_date(ymd_hms(x$properties$datetime)) %in% excl_dates$date })
-  
-  if (length(it_obj$features) > 0) {
-    
-    suppressMessages({
-      suppressWarnings({
-        itst <- items_as_sf(it_obj) %>% st_make_valid()
-        itst <- st_crop(itst, aoi %>% st_transform(st_crs(itst)))
-      })
-    })
-    
-    if(nrow(itst) > 0){
-      itst$area <- as.numeric(st_area(itst)) / (1000 * 1000)
-      
-      # Duplicate handling
-      tt <- itst %>%
-        mutate(date = as_date(ymd_hms(datetime))) %>%
-        group_by(date, instruments, `landsat:wrs_path`, .add = TRUE) %>%
-        mutate(n = n()) %>%
-        arrange(desc(n)) %>% mutate(gid = cur_group_id()) %>% group_split()
-      
-      suppressMessages({
-        suppressWarnings({
-          sf::sf_use_s2(FALSE) # GEOMETRY FIX
-          tt <- lapply(tt, function(x) {
-            if (nrow(x) > 1) {
-              if (length(unique(x$area)) == 1) {
-                x <- x %>% slice(1)
-              } else if (nrow(x) > 2) {
-                # More than two scenes: keep all, they are merged later in
-                # the same-date mosaicking step
-                x <- x
-              } else {
-                stint <- st_intersection(x) %>% st_make_valid() %>% slice(2) %>% st_area %>% as.numeric()
-                x <- x %>% filter(area > stint / (1000 * 1000) + 1)
-              }
-            }
-            return(x)
-          }) %>% bind_rows()
-          sf::sf_use_s2(TRUE)
-        })
-      })
-      
-      itst <- itst %>%
-        filter(`landsat:scene_id` %in% (tt %>% pull(`landsat:scene_id`)))
-      
-      it_obj <- it_obj %>%
-        items_filter(filter_fn = function(x) { x$properties$`landsat:scene_id` %in% (itst %>% pull(`landsat:scene_id`)) })
-      
-      # --- CALL PROCESSING IN PARALLEL (FUTURE) ---
-      juuh <- process_features_in_parallel(it_obj, area_landsat_dir, aoi, workers, epsg = epsg)
-      
-      # Renaming platforms for compatibility
-      itst$platform <- case_when(
-        itst$platform == "landsat-4" ~ "LT04",
-        itst$platform == "landsat-5" ~ "LT05",
-        itst$platform == "landsat-7" ~ "LE07",
-        itst$platform == "landsat-8" ~ "LC08",
-        itst$platform == "landsat-9" ~ "LC09",
-        TRUE ~ itst$platform
-      )
-      
-      tifs <- list.files(area_landsat_dir, pattern = "GMT.tif$")
-      
-      idsALL <- itst %>%
-        mutate(date = gsub("-", "", as_date(ymd_hms(datetime)))) %>%
-        mutate(date2 = gsub("-", "", as_date(ymd_hms(created)))) %>%
-        mutate(time = paste0(gsub(":", "", substr(datetime, 12, 19)), "GMT.tif")) %>%
-        mutate(file = paste0(platform, "_", `landsat:correction`, "_",
-                             `landsat:wrs_path`, `landsat:wrs_row`, "_",
-                             date, "_", date2, "_",
-                             `landsat:collection_number`, "_", `landsat:collection_category`, "_",
-                             time)) %>%
-        select(file, date, `eo:cloud_cover`, `view:sun_elevation`) %>%
-        rename(DATE_ACQUIRED = date,
-               CLOUD_COVER = `eo:cloud_cover`,
-               SUN_ELEVATION = `view:sun_elevation`) %>%
-        st_drop_geometry() %>%
-        filter(file %in% tifs) %>%
-        mutate(DATE_ACQUIRED = ymd(DATE_ACQUIRED)) %>%
-        rownames_to_column("id")
-    } else {
-      print("No new Landsat scenes downloaded!")
-      idsALL <- NULL
-    }
-  } else {
-    print("No new Landsat scenes downloaded!")
-    idsALL <- NULL
+    items_filter(filter_fn = function(x) { !feat_group(x) %in% excl_groups })
+
+  if (length(it_obj$features) == 0) {
+    print("No new Landsat scenes to download!")
+    return(list(meta = NULL, log = NULL))
   }
-  
-  return(idsALL)
+
+  suppressMessages({
+    suppressWarnings({
+      itst <- items_as_sf(it_obj) %>% st_make_valid()
+      itst <- st_crop(itst, aoi %>% st_transform(st_crs(itst)))
+    })
+  })
+
+  if (nrow(itst) == 0) {
+    print("No new Landsat scenes to download!")
+    return(list(meta = NULL, log = NULL))
+  }
+
+  itst$area <- as.numeric(st_area(itst)) / (1000 * 1000)
+
+  # Duplicate handling
+  tt <- itst %>%
+    mutate(date = as_date(ymd_hms(datetime))) %>%
+    group_by(date, instruments, `landsat:wrs_path`, .add = TRUE) %>%
+    mutate(n = n()) %>%
+    arrange(desc(n)) %>% mutate(gid = cur_group_id()) %>% group_split()
+
+  suppressMessages({
+    suppressWarnings({
+      sf::sf_use_s2(FALSE) # GEOMETRY FIX
+      tt <- lapply(tt, function(x) {
+        if (nrow(x) > 1) {
+          if (length(unique(x$area)) == 1) {
+            x <- x %>% slice(1)
+          } else if (nrow(x) > 2) {
+            # More than two scenes: keep all, they are merged later in
+            # the same-date mosaicking step
+            x <- x
+          } else {
+            stint <- st_intersection(x) %>% st_make_valid() %>% slice(2) %>% st_area %>% as.numeric()
+            x <- x %>% filter(area > stint / (1000 * 1000) + 1)
+          }
+        }
+        return(x)
+      }) %>% bind_rows()
+      sf::sf_use_s2(TRUE)
+    })
+  })
+
+  itst <- itst %>%
+    filter(`landsat:scene_id` %in% (tt %>% pull(`landsat:scene_id`)))
+
+  it_obj <- it_obj %>%
+    items_filter(filter_fn = function(x) { x$properties$`landsat:scene_id` %in% (itst %>% pull(`landsat:scene_id`)) })
+
+  message(length(it_obj$features), " Landsat scene(s) to download")
+
+  # --- DOWNLOAD IN PARALLEL (FUTURE), WITH RETRIES ---
+  res <- process_features_in_parallel(it_obj, area_landsat_dir, aoi, workers, epsg = epsg,
+                                      max_retries = max_retries, retry_rounds = retry_rounds,
+                                      retry_wait = retry_wait, http_retries = http_retries,
+                                      http_retry_delay = http_retry_delay)
+
+  # Renaming platforms for compatibility
+  itst$platform <- unname(short[itst$platform])
+
+  ok_files <- res$file[res$status %in% c("SUCCESS", "EXISTS")]
+  idsALL <- itst %>%
+    mutate(date = gsub("-", "", as_date(ymd_hms(datetime)))) %>%
+    mutate(date2 = gsub("-", "", as_date(ymd_hms(created)))) %>%
+    mutate(time = paste0(gsub(":", "", substr(datetime, 12, 19)), "GMT.tif")) %>%
+    mutate(file = paste0(platform, "_", `landsat:correction`, "_",
+                         `landsat:wrs_path`, `landsat:wrs_row`, "_",
+                         date, "_", date2, "_",
+                         `landsat:collection_number`, "_", `landsat:collection_category`, "_",
+                         time)) %>%
+    select(file, date, `eo:cloud_cover`, `view:sun_elevation`) %>%
+    rename(DATE_ACQUIRED = date,
+           CLOUD_COVER = `eo:cloud_cover`,
+           SUN_ELEVATION = `view:sun_elevation`) %>%
+    st_drop_geometry() %>%
+    filter(file %in% ok_files) %>%
+    mutate(DATE_ACQUIRED = ymd(DATE_ACQUIRED)) %>%
+    rownames_to_column("id")
+
+  return(list(meta = idsALL, log = res))
 }
 
 #' Internal Function: Parallel Feature Processing with Grid Alignment
-process_features_in_parallel <- function(it_obj, area_landsat_dir, aoi, workers, epsg) {
-  
+process_features_in_parallel <- function(it_obj, area_landsat_dir, aoi, workers, epsg,
+                                         max_retries = 5, retry_rounds = 2, retry_wait = 60,
+                                         http_retries = 10, http_retry_delay = 5) {
+
   # 1. Grid template: the extent comes from the AOI itself, and only the
   # pixel alignment (origin) is taken from a scene in the target UTM zone.
   # (Earlier the extent was the AOI cropped to one scene, so if that scene
   # covered only part of the AOI, e.g. a neighbouring WRS row, every image
   # got the truncated extent.)
+  Sys.setenv(GDAL_HTTP_MAX_RETRY = http_retries, GDAL_HTTP_RETRY_DELAY = http_retry_delay)
   reso_val <- 30
   grid_origin <- c(15, 15) # Landsat C2 UTM grid: pixel corners at 15 m offsets
   idx <- which(vapply(it_obj$features, item_epsg, numeric(1)) == epsg)
@@ -444,25 +448,15 @@ process_features_in_parallel <- function(it_obj, area_landsat_dir, aoi, workers,
     }
   }
   exte_vals <- aoi_grid_extent(aoi, epsg, reso_val, grid_origin)
-  
-  # 2. Parallel Processing with future_lapply
-  # Note: workers is ignored here because plan is set in extract_landsat
-  future.apply::future_lapply(
-    it_obj$features, 
-    process_feature, 
-    area_landsat_dir = area_landsat_dir, 
-    aoi = aoi,
-    exte = exte_vals,
-    reso = reso_val,
-    future.packages = c("sf", "terra", "stringr", "rstac"),
-    future.seed = TRUE,
-    future.scheduling = 10,
-    future.globals = c("make_vsicurl_url")
-  )
+
+  # 2. Parallel downloads with retry rounds (workers: the plan set in extract_landsat)
+  download_rounds(it_obj$features, process_feature,
+                  list(area_landsat_dir = area_landsat_dir, aoi = aoi, exte = exte_vals, reso = reso_val,
+                       max_retries = max_retries, http_retries = http_retries,
+                       http_retry_delay = http_retry_delay),
+                  retry_rounds = retry_rounds, retry_wait = retry_wait)
 }
 
-# Internal Function: EPSG code of a STAC item. Works with both the old
-# 'proj:epsg' (projection extension v1) and the newer 'proj:code' ("EPSG:32634").
 item_epsg <- function(x) {
   p <- x$properties
   if (!is.null(p$`proj:epsg`)) return(as.numeric(p$`proj:epsg`))
@@ -480,70 +474,72 @@ aoi_grid_extent <- function(aoi, epsg, reso, origin) {
     snap_down(bb[2], origin[2]), snap_up(bb[4], origin[2]))
 }
 
+
 #' Internal Function: Single Feature Extraction with Retry Logic
-# ft <- it_obj$features[[2]]
-process_feature <- function(ft, area_landsat_dir, aoi, exte, reso) {
-  
+#'
+#' All bands must be read: a band that cannot be opened fails the attempt (earlier
+#' versions replaced it with an empty band, which made the image unusable for
+#' classification). The image is written under a temporary name and renamed only
+#' after it has been read back, so an interrupted run never leaves a partial image
+#' that would count as downloaded. Returns a one-row tibble
+#' (file, status = SUCCESS / EXISTS / ERROR, attempts, message).
+#' @noRd
+process_feature <- function(ft, area_landsat_dir, aoi, exte, reso,
+                            max_retries = 5, http_retries = 10, http_retry_delay = 5) {
+
+  # self-contained for parallel workers
   make_vsicurl_url <- function(base_url) {
     paste0("/vsicurl", "?pc_url_signing=yes", "&pc_collection=landsat-c2-l2", "&url=", base_url)
   }
-  
+  # GDAL retries throttled / failed HTTP requests itself before an attempt fails
+  Sys.setenv(GDAL_HTTP_MAX_RETRY = http_retries, GDAL_HTTP_RETRY_DELAY = http_retry_delay)
+
   nm <- paste0(paste(str_split(ft$id, "_")[[1]][1:4], collapse = "_"), "_",
                gsub("-", "", substr(ft$properties$created, 1, 10)), "_",
                paste(str_split(ft$id, "_")[[1]][5:6], collapse = "_"), "_",
                gsub(":", "", substr(ft$properties$datetime, 12, 19)), "GMT.tif")
-  
+  out <- function(status, attempts, msg = "") {
+    dplyr::tibble(file = nm, status = status, attempts = as.integer(attempts), message = substr(msg, 1, 500))
+  }
+
   output_file <- file.path(area_landsat_dir, nm)
-  if (file.exists(output_file)) return(paste0("EXISTS:", nm))
-  
+  if (file.exists(output_file)) return(out("EXISTS", 0))
+  tmp_file <- paste0(output_file, ".part")
+
   full_url <- make_vsicurl_url(rstac::assets_url(ft))
-  max_retries <- 3
-  
-  for (iii in 1:max_retries) {
+  err <- ""
+
+  for (iii in seq_len(max_retries)) {
     e <- try({
-      # Attempt to load bands, handling vsicurl errors by dropping bad bands
-      ee <- try(r_remote <- terra::rast(full_url), silent = TRUE)
-      
-      if(inherits(ee, "try-error")){
-        # Regex to find failing URL
-        raw_err <- as.character(ee)
-        extracted_url <- gsub("\\n","", stringr::str_extract(raw_err, "(https://.+?)\\n"))
-        r_remote <- terra::rast(full_url[!full_url %in% make_vsicurl_url(extracted_url)])
-      } else {
-        extracted_url <- NULL
-      }
-      
+      r_remote <- terra::rast(full_url)
+
       # Alignment Step: Use Numeric Template to force exact Grid
       template <- terra::rast(extent = terra::ext(exte), resolution = reso, crs = sf::st_crs(aoi)$wkt)
-      
+
       r_cropped <- terra::crop(r_remote, sf::st_transform(aoi, sf::st_crs(r_remote)))
       r_final <- terra::project(r_cropped, template, method = "near")
-      
-      if(length(extracted_url) > 0){
-        
-        for(i_miss in extracted_url){
-          
-          rtemp <- r_final[[1]]
-          rtemp[] <- NA
-          names(rtemp) <- stringr::str_split_i(basename(extracted_url), "\\.", 1)
-          r_final <- c(r_final, rtemp)
-          
-        }
-        
-      }
-      
+
       # Metadata formatting
       names(r_final) <- sapply(str_split(names(r_final), "_"), function(x) paste(x[8:9], collapse = "_"))
       r_final <- r_final[[c(names(r_final)[grepl("SR_", names(r_final))] %>% sort,
                             names(r_final)[grepl("ST_", names(r_final))] %>% sort,
                             names(r_final)[grepl("QA_", names(r_final))] %>% sort)]]
-      terra::writeRaster(r_final, output_file, datatype = "INT2U", overwrite = TRUE, NAflag = 0)
+      terra::writeRaster(r_final, tmp_file, filetype = "GTiff", datatype = "INT2U",
+                         overwrite = TRUE, NAflag = 0)
+
+      # read the written image back before it counts as downloaded
+      chk <- terra::rast(tmp_file)
+      if (terra::nlyr(chk) != terra::nlyr(r_final)) stop("written image has missing bands")
+      invisible(terra::global(chk[[1]], "notNA"))
+      if (!file.rename(tmp_file, output_file)) stop("could not rename ", tmp_file)
     }, silent = TRUE)
-    
-    if (!inherits(e, "try-error")) return(paste0("SUCCESS:", nm))
-    if (iii == max_retries) return(paste0("ERROR:", nm, " - ", as.character(e)))
-    Sys.sleep(iii * 2) 
+
+    if (!inherits(e, "try-error")) return(out("SUCCESS", iii))
+    err <- trimws(as.character(e))
+    unlink(tmp_file)
+    if (iii < max_retries) Sys.sleep(min(300, 5 * 2^(iii - 1)) * stats::runif(1, 0.75, 1.25))
   }
+  out("ERROR", max_retries, err)
 }
 
 #' Quality Control: Reset Workers

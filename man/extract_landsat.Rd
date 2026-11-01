@@ -16,7 +16,12 @@ extract_landsat(
   base_landsat_dir,
   workers = 1,
   data_source = "rstac",
-  force = FALSE
+  force = FALSE,
+  max_retries = 5,
+  retry_rounds = 2,
+  retry_wait = 60,
+  http_retries = 10,
+  http_retry_delay = 5
 )
 }
 \arguments{
@@ -43,13 +48,39 @@ Setting workers > 1 (default) enables parallel computing.}
 
 \item{data_source}{A character string representing the data source (currently only option is "rstac").}
 
-\item{force}{Logical, if TRUE deletes all previously downloaded imagery.}
+\item{force}{Logical, if TRUE deletes all previously downloaded imagery and the scene tables.}
+
+\item{max_retries}{Attempts per scene within one round (default 5), with waits of about 5, 10, 20, 40 s.}
+
+\item{retry_rounds}{Further rounds for scenes that failed in all their attempts (default 2).}
+
+\item{retry_wait}{Pause in seconds before retry round k is \code{k * retry_wait} (default 60).}
+
+\item{http_retries, http_retry_delay}{GDAL's own retries of failed HTTP requests and the initial
+delay in seconds (GDAL_HTTP_MAX_RETRY, GDAL_HTTP_RETRY_DELAY).}
 }
 \value{
-A tibble containing the metadata of the downloaded Landsat scenes.
+A tibble containing the metadata of all usable Landsat scenes of the site (the content
+of \code{lss_final.csv}), or NULL if there are none. Scenes that could not be downloaded in this run
+are in \code{attr(result, "failed")}.
 }
 \description{
 This function extracts Landsat imagery that fulfills the specified arguments.
 It processes the area of interest (AOI), transforms coordinates, and downloads
 the relevant Landsat scenes.
+}
+\details{
+Downloads are robust to temporary throttling by the Planetary Computer: GDAL
+retries failed HTTP requests (\code{http_retries}), each scene is attempted up to
+\code{max_retries} times with growing waits, and scenes that still fail are retried
+in up to \code{retry_rounds} further rounds. Every scene's outcome is appended to
+\code{imagery/download_log.csv}; scenes that could not be downloaded are reported
+in a warning and attempted again when the function is run again.
+
+The function can be re-run to update a site (e.g. with a later \code{end_date}): it
+downloads only scenes that are not yet known. Known scenes are images on disk,
+scenes listed in \code{imagery/lss_final.csv} (also if their images have since been
+deleted, e.g. after classification) and scenes rejected earlier as too cloudy
+(\code{imagery/lss_rejected.csv}). Only the newly downloaded images are checked and
+added to \code{lss_final.csv}.
 }

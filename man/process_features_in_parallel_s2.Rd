@@ -4,7 +4,18 @@
 \alias{process_features_in_parallel_s2}
 \title{Internal Function: Parallel Feature Processing (Sentinel-2) with Grid Alignment}
 \usage{
-process_features_in_parallel_s2(it_obj, area_sentinel2_dir, aoi, workers, epsg)
+process_features_in_parallel_s2(
+  it_obj,
+  area_sentinel2_dir,
+  aoi,
+  workers,
+  epsg,
+  max_retries = 5,
+  retry_rounds = 2,
+  retry_wait = 60,
+  http_retries = 10,
+  http_retry_delay = 5
+)
 }
 \description{
 Internal Function: Parallel Feature Processing (Sentinel-2) with Grid Alignment
