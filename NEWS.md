@@ -13,7 +13,10 @@
   a warning and in `attr(result, "failed")`, and they are attempted again on the
   next run.
 * A band that cannot be read now fails the scene (and it is retried) instead of
-  being replaced by an empty band.
+  being replaced by an empty band. When the same band(s) fail in three attempts in
+  a row while all other bands open, the file is taken to be damaged on the server:
+  the scene is logged as BROKEN after about 20 s instead of being retried for
+  minutes (it is attempted again on the next run).
 * Images are written under a temporary name and renamed only after they have
   been read back, so an interrupted run leaves no partial images.
 * Incremental updates: a re-run downloads only scenes that are not yet known

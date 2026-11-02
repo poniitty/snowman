@@ -174,7 +174,7 @@ extract_sentinel2 <- function(aoi,
   gc()
   write_download_log(dl$log, area_sentinel2_dir)
   report_downloads(dl$log, length(known), area_sentinel2_dir)
-  failed <- if (is.null(dl$log)) NULL else dl$log %>% filter(status == "ERROR")
+  failed <- if (is.null(dl$log)) NULL else dl$log %>% filter(status %in% c("ERROR", "BROKEN"))
 
   # s2s.csv: catalogue metadata of every downloaded scene (also of those later
   # rejected), accumulated over runs
@@ -399,6 +399,12 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
       x$properties$`s2:granule_id` %in% (itst %>% pull(`s2:granule_id`))
     })
 
+  # all remaining items can be dropped by the duplicate handling (e.g. a re-run in which the only
+  # unknown items are partial duplicates of downloaded scenes)
+  if (length(it_obj$features) == 0) {
+    print("No new Sentinel-2 scenes to download!")
+    return(list(meta = NULL, log = NULL))
+  }
   message(length(it_obj$features), " Sentinel-2 scene(s) to download")
 
   # --- DOWNLOAD IN PARALLEL (FUTURE), WITH RETRIES ---
@@ -467,7 +473,7 @@ process_features_in_parallel_s2 <- function(it_obj, area_sentinel2_dir, aoi, wor
 #' All bands must be read: a band that cannot be opened fails the attempt (earlier
 #' versions replaced it with an empty band). The image is written under a
 #' temporary name and renamed only after it has been read back. Returns a one-row
-#' tibble (file, status = SUCCESS / EXISTS / ERROR, attempts, message).
+#' tibble (file, status = SUCCESS / EXISTS / ERROR / BROKEN, attempts, message).
 #' @noRd
 process_feature_s2 <- function(ft, area_sentinel2_dir, aoi, exte, reso,
                                max_retries = 5, http_retries = 10, http_retry_delay = 5) {
@@ -500,11 +506,27 @@ process_feature_s2 <- function(ft, area_sentinel2_dir, aoi, exte, reso,
   band_key <- c("B01", "B02", "B03", "B04", "B05", "B06",
                 "B07", "B08", "B8A", "B09", "B11", "B12", "SCL")
   err <- ""
+  prev_bad <- NULL; same_bad <- 0
 
   for (iii in seq_len(max_retries)) {
+    # Open every band separately. A band that fails to open while all the others open is
+    # probably a damaged file on the server (rare on the Planetary Computer); when the same
+    # band(s) fail in 3 attempts in a row, the scene is given up as BROKEN instead of being
+    # retried for minutes. Throttling makes all or varying bands fail, which is retried.
+    r_list <- lapply(all_urls, function(u) try(terra::rast(u), silent = TRUE))
+    bad <- which(vapply(r_list, inherits, logical(1), "try-error"))
+    if (length(bad)) {
+      err <- paste0("cannot open ", paste(sub(".*/", "", all_urls[bad]), collapse = ", "), ": ",
+                    trimws(as.character(r_list[[bad[1]]])))
+      same_bad <- if (identical(bad, prev_bad)) same_bad + 1 else 1
+      prev_bad <- bad
+      if (length(bad) < length(all_urls) && same_bad >= 3) return(out("BROKEN", iii, err))
+      if (iii < max_retries) Sys.sleep(min(300, 5 * 2^(iii - 1)) * stats::runif(1, 0.75, 1.25))
+      next
+    }
+    prev_bad <- NULL; same_bad <- 0
     e <- try({
-      # Open every band separately: bands come at 10, 20 and 60 m
-      r_list <- lapply(all_urls, terra::rast)
+      # bands come at 10, 20 and 60 m: each is cropped and projected separately below
 
       # Grid alignment: project all bands to the 10 m UTM template.
       # This uniformly resamples 20 m bands (B05-B07, B8A, B11, B12, SCL) and

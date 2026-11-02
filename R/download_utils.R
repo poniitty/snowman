@@ -70,9 +70,13 @@ known_groups <- function(image_dir, final_csv, rejected_csv, sensor) {
 
 # Internal: download features in parallel, then retry the failed ones in further
 # rounds after a pause (throttling is usually temporary). FUN returns a one-row
-# tibble (file, status, attempts, message) per feature.
+# tibble (file, status, attempts, message) per feature. Scenes with a damaged band
+# on the server (status BROKEN) are not retried in further rounds.
 download_rounds <- function(features, FUN, fun_args, retry_rounds = 2, retry_wait = 60,
                             packages = c("sf", "terra", "stringr", "rstac")) {
+  empty <- dplyr::tibble(file = character(0), status = character(0), attempts = integer(0),
+                         message = character(0), round = integer(0))
+  if (!length(features)) return(empty)
   out <- list()
   todo <- seq_along(features)
   for (round in 0:retry_rounds) {
@@ -109,8 +113,10 @@ write_download_log <- function(res, image_dir) {
 report_downloads <- function(res, n_known, image_dir) {
   if (is.null(res)) res <- dplyr::tibble(status = character(0))
   n_ok <- sum(res$status %in% c("SUCCESS", "EXISTS")); n_err <- sum(res$status == "ERROR")
-  message("Scenes: ", n_known, " known from earlier runs, ", n_ok, " downloaded, ", n_err, " failed")
-  if (n_err > 0)
-    warning(n_err, " scene(s) could not be downloaded (see ", file.path(image_dir, "download_log.csv"),
+  n_broken <- sum(res$status == "BROKEN")
+  message("Scenes: ", n_known, " known from earlier runs, ", n_ok, " downloaded, ", n_err, " failed",
+          if (n_broken) paste0(", ", n_broken, " with a damaged band on the server") else "")
+  if (n_err + n_broken > 0)
+    warning(n_err + n_broken, " scene(s) could not be downloaded (see ", file.path(image_dir, "download_log.csv"),
             "). They are attempted again when the function is run again.", call. = FALSE)
 }

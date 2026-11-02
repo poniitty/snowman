@@ -173,7 +173,7 @@ extract_landsat <- function(aoi,
   gc()
   write_download_log(dl$log, area_landsat_dir)
   report_downloads(dl$log, length(known), area_landsat_dir)
-  failed <- if (is.null(dl$log)) NULL else dl$log %>% filter(status == "ERROR")
+  failed <- if (is.null(dl$log)) NULL else dl$log %>% filter(status %in% c("ERROR", "BROKEN"))
 
   # lss.csv: catalogue metadata of every downloaded scene (also of those later
   # rejected), accumulated over runs
@@ -392,6 +392,12 @@ extract_landsat_stac <- function(aoi, epsg, excl_groups, site_name,
   it_obj <- it_obj %>%
     items_filter(filter_fn = function(x) { x$properties$`landsat:scene_id` %in% (itst %>% pull(`landsat:scene_id`)) })
 
+  # all remaining items can be dropped by the duplicate handling (e.g. a re-run in which the only
+  # unknown items are partial duplicates of downloaded scenes)
+  if (length(it_obj$features) == 0) {
+    print("No new Landsat scenes to download!")
+    return(list(meta = NULL, log = NULL))
+  }
   message(length(it_obj$features), " Landsat scene(s) to download")
 
   # --- DOWNLOAD IN PARALLEL (FUTURE), WITH RETRIES ---
@@ -482,7 +488,7 @@ aoi_grid_extent <- function(aoi, epsg, reso, origin) {
 #' classification). The image is written under a temporary name and renamed only
 #' after it has been read back, so an interrupted run never leaves a partial image
 #' that would count as downloaded. Returns a one-row tibble
-#' (file, status = SUCCESS / EXISTS / ERROR, attempts, message).
+#' (file, status = SUCCESS / EXISTS / ERROR / BROKEN, attempts, message).
 #' @noRd
 process_feature <- function(ft, area_landsat_dir, aoi, exte, reso,
                             max_retries = 5, http_retries = 10, http_retry_delay = 5) {
@@ -508,10 +514,27 @@ process_feature <- function(ft, area_landsat_dir, aoi, exte, reso,
 
   full_url <- make_vsicurl_url(rstac::assets_url(ft))
   err <- ""
+  prev_bad <- NULL; same_bad <- 0
 
   for (iii in seq_len(max_retries)) {
+    # Open every band separately. A band that fails to open while all the others open is
+    # probably a damaged file on the server (rare on the Planetary Computer); when the same
+    # band(s) fail in 3 attempts in a row, the scene is given up as BROKEN instead of being
+    # retried for minutes. Throttling makes all or varying bands fail, which is retried.
+    r_list <- lapply(full_url, function(u) try(terra::rast(u), silent = TRUE))
+    bad <- which(vapply(r_list, inherits, logical(1), "try-error"))
+    if (length(bad)) {
+      err <- paste0("cannot open ", paste(sub(".*/", "", full_url[bad]), collapse = ", "), ": ",
+                    trimws(as.character(r_list[[bad[1]]])))
+      same_bad <- if (identical(bad, prev_bad)) same_bad + 1 else 1
+      prev_bad <- bad
+      if (length(bad) < length(full_url) && same_bad >= 3) return(out("BROKEN", iii, err))
+      if (iii < max_retries) Sys.sleep(min(300, 5 * 2^(iii - 1)) * stats::runif(1, 0.75, 1.25))
+      next
+    }
+    prev_bad <- NULL; same_bad <- 0
     e <- try({
-      r_remote <- terra::rast(full_url)
+      r_remote <- terra::rast(r_list)       # all Landsat bands share the 30 m grid
 
       # Alignment Step: Use Numeric Template to force exact Grid
       template <- terra::rast(extent = terra::ext(exte), resolution = reso, crs = sf::st_crs(aoi)$wkt)
