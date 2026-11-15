@@ -21,7 +21,10 @@ extract_sentinel2(
   retry_rounds = 2,
   retry_wait = 60,
   http_retries = 10,
-  http_retry_delay = 5
+  http_retry_delay = 5,
+  groups = NULL,
+  max_per_month = NULL,
+  min_clear = 0.1
 )
 }
 \arguments{
@@ -59,10 +62,26 @@ Setting workers > 1 (default) enables parallel computing.}
 
 \item{http_retries, http_retry_delay}{GDAL's own retries of failed HTTP requests and the initial
 delay in seconds (GDAL_HTTP_MAX_RETRY, GDAL_HTTP_RETRY_DELAY).}
+
+\item{groups}{Optional character vector of scene groups \code{"<sat>_<tile>_<yyyymmdd>"} (e.g.
+\code{"S2A_T33WXR_20170903"}): only these scenes are downloaded (still subject to \code{minclouds}, so use
+\code{minclouds = 101} to get them regardless of cloud cover). The search period is then the range of
+their dates. Used e.g. to download the scenes of labelled training data.}
+
+\item{max_per_month}{Optional maximum number of scenes per calendar month (over all years of the
+period). Scenes covering at least 95\\% of the AOI are preferred, then those with the lowest
+catalogue cloud cover. Scenes already known for the site count towards the maximum, so a re-run
+does not add more. Used to limit the data volume, e.g. for the monthly median images of
+\code{\link[=calc_predictors_s2]{calc_predictors_s2()}}. NULL (default) = no limit.}
+
+\item{min_clear}{Images whose clear proportion (no fill, no cloud) is below this are deleted and
+recorded as rejected (default 0.1). With 0, only images without any data are rejected
+(e.g. to keep cloudy scenes of training data).}
 }
 \value{
 A tibble containing the metadata of all usable Sentinel-2 scenes of the site (the content
-of \code{s2s_final.csv}), or NULL if there are none. Scenes that could not be downloaded in this run
+of \code{s2s_final.csv}, including the processing baseline of each scene in \code{PROCESSING_BASELINE}, used
+to harmonise the reflectance offset of baseline 04.00 and later), or NULL if there are none. Scenes that could not be downloaded in this run
 are in \code{attr(result, "failed")}.
 }
 \description{

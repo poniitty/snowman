@@ -12,7 +12,7 @@ download_model(
 )
 }
 \arguments{
-\item{model_names}{Character vector specifying for which satellites you want to download the models. Any of "TM04","TM05","LE07","LC08","LC09" or "ALL"}
+\item{model_names}{Character vector specifying for which satellites you want to download the models. Any of "TM04","TM05","LE07","LC08","LC09", "S2" (Sentinel-2, for \code{\link[=classify_sentinel2]{classify_sentinel2()}}) or "ALL"}
 
 \item{model_dir}{Character, path to folder where the model objects will be stored.}
 

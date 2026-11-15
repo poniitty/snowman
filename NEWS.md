@@ -1,5 +1,40 @@
 # snowman (development version)
 
+## Landsat classification: features now match the models' training data
+
+* `classify_landsat()`: for Landsat 4-7, the median-image differences (`mr_diff_*`) are now
+  calculated as in the models' training data. There, the images had no B1 layer, so the
+  median bands B1-B7 were subtracted from the image layers B2-B7 and B10 in layer order (e.g.
+  `mr_diff_B7` = median B7 - thermal B10, about -30000; `mr_diff_B1` = median B1 - B2). The
+  classifier instead used aligned bands with an empty B1 (`mr_diff_B1` = median B1, all
+  values beyond the models' split points). The TM05 model uses `mr_diff_B1`, `_B5`, `_B6`
+  and the LE07 model `mr_diff_B1`, `_B5`, `_B6`, `_B7`. Landsat 8-9 were not affected.
+  Landsat 4-7 images classified earlier should be classified again (`force = TRUE`).
+* `calc_predictors()`: the median indices use the 5 clearest scenes per month (before: 3)
+  and the monthly median images the 50 clearest (before: 30), as in the models' training data.
+
+## Sentinel-2 classification
+
+* New `calc_predictors_s2()`, `classify_sentinel2()`: the Sentinel-2 counterparts of
+  `calc_predictors()` and `classify_landsat()`. The classifications are at 10 m and
+  have the same layers as the Landsat ones (`class`, `land`, `water`, `snow`,
+  `cloud`, `artif`), so `calc_snow_variables()` works on them unchanged
+  (`base_landsat_dir = base_sentinel2_dir`). One model for Sentinel-2A, 2B and 2C;
+  `download_model("S2")` fetches `latest_S2.rds` once it is published.
+* `classify_sentinel2()` takes random forest or LightGBM models: `s2_model()` wraps a fitted model,
+  `s2_predict_probs()` predicts both kinds with the same code in training and classification
+  (`s2_model_matrix()` gives LightGBM's predictor matrix). Only the features the model uses are
+  calculated, and pixels are predicted in chunks. `lightgbm` is a suggested package.
+* New `s2_feature_stack()` and `s2_prep_predictors()` build the classifier's
+  features (shared by model training and classification), and `read_sentinel2()`
+  reads an image harmonised across the processing baseline 04.00 change (+1000
+  reflectance offset since 25 January 2022).
+* `extract_sentinel2()`: new arguments `groups` (download only given scenes, e.g.
+  those of training data), `max_per_month` (at most this many scenes per calendar
+  month, preferring scenes covering the AOI and low cloud cover) and `min_clear`
+  (rejection threshold, previously fixed at 0.1). The processing baseline of each
+  scene is recorded in the scene tables (`PROCESSING_BASELINE`).
+
 ## Downloads (`extract_landsat()`, `extract_sentinel2()`)
 
 * Images now cover the whole AOI grid: each scene is cut with the snapped AOI grid

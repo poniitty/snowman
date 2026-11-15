@@ -313,8 +313,17 @@ classifying_function <- function(imageid, image_df, predictor_dir, class_landsat
       mo_use <- avail_mo[which.min(mo_dist)]
       mr <- terra::rast(paste0(predictor_dir, "/medianlandsat_", mo_use, ".tif"))
       
-      mr_diff <- mr - r[[1:7]]
-      names(mr_diff) <- paste0("mr_diff_", names(mr_diff))
+      # Median image minus the image, band by band in layer order, exactly as in the training data
+      # of the models: for Landsat 4-7 the training images had no B1 layer, so the 7 median bands
+      # (B1-B7) were paired with the image layers B2, B3, B4, B5, B6, B7, B10. The TM05 and LE07
+      # models (2025-04-22) rely on these shifted differences (e.g. LE07 mr_diff_B7 = median B7 - B10).
+      # Retrained Landsat 4-7 models should use aligned bands, and this line then mr - r[[1:7]].
+      if (satid %in% c("LC08", "LC09")) {
+        mr_diff <- mr - r[[1:7]]
+      } else {
+        mr_diff <- mr - r[[c("B2", "B3", "B4", "B5", "B6", "B7", "B10")]]
+      }
+      names(mr_diff) <- paste0("mr_diff_", c("B1", "B2", "B3", "B4", "B5", "B6", "B7"))
       if (any(grepl("mr_diff_B5_std5", mod_vars))) {
         mr_diff[["mr_diff_B5_std5"]] <- terra::focal(r[["B5"]], w = 5, fun = "sd") - terra::focal(mr[["B5"]], w = 5, fun = "sd")
       }

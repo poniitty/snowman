@@ -2,7 +2,7 @@
 #'
 #' This function downloads the pretrained model from a GitHub repository.
 #'
-#' @param model_names Character vector specifying for which satellites you want to download the models. Any of "TM04","TM05","LE07","LC08","LC09" or "ALL"
+#' @param model_names Character vector specifying for which satellites you want to download the models. Any of "TM04","TM05","LE07","LC08","LC09", "S2" (Sentinel-2, for [classify_sentinel2()]) or "ALL"
 #' @param model_dir Character, path to folder where the model objects will be stored.
 #' @param timeout Maximum time to use to download the files (á ~80MB). Defaults to 300 seconds. Increase if very slow network.
 #' @param force Logical. If FALSE (default) downloads the model object only if no previous model file exists.
@@ -87,6 +87,15 @@ download_model <- function(model_names = c("TM04","TM05","LE07","LC08","LC09"), 
       # Download the model object for Landsat-8 & Landsat 9
       download.file(paste0(repo_url, "Landsat_models/latest_LC08.rds"), 
                     destfile = file.path(model_dir, "latest_LC08.rds"), mode = "wb")
+    }
+  }
+
+  if(force == TRUE | (!file.exists(file.path(model_dir, "latest_S2.rds")))){
+    if(any(c("s2","s2a","s2b","s2c","sentinel2","all") %in% tolower(model_names))){
+      print("Downloading Sentinel-2 model...")
+      # One model for Sentinel-2A, 2B and 2C (used by classify_sentinel2())
+      download.file(paste0(repo_url, "Sentinel2_models/latest_S2.rds"), 
+                    destfile = file.path(model_dir, "latest_S2.rds"), mode = "wb")
     }
   }
 }

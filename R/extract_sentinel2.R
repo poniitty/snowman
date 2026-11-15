@@ -37,8 +37,21 @@
 #' @param retry_wait Pause in seconds before retry round k is `k * retry_wait` (default 60).
 #' @param http_retries,http_retry_delay GDAL's own retries of failed HTTP requests and the initial
 #' delay in seconds (GDAL_HTTP_MAX_RETRY, GDAL_HTTP_RETRY_DELAY).
+#' @param groups Optional character vector of scene groups `"<sat>_<tile>_<yyyymmdd>"` (e.g.
+#' `"S2A_T33WXR_20170903"`): only these scenes are downloaded (still subject to `minclouds`, so use
+#' `minclouds = 101` to get them regardless of cloud cover). The search period is then the range of
+#' their dates. Used e.g. to download the scenes of labelled training data.
+#' @param max_per_month Optional maximum number of scenes per calendar month (over all years of the
+#' period). Scenes covering at least 95\% of the AOI are preferred, then those with the lowest
+#' catalogue cloud cover. Scenes already known for the site count towards the maximum, so a re-run
+#' does not add more. Used to limit the data volume, e.g. for the monthly median images of
+#' [calc_predictors_s2()]. NULL (default) = no limit.
+#' @param min_clear Images whose clear proportion (no fill, no cloud) is below this are deleted and
+#' recorded as rejected (default 0.1). With 0, only images without any data are rejected
+#' (e.g. to keep cloudy scenes of training data).
 #' @return A tibble containing the metadata of all usable Sentinel-2 scenes of the site (the content
-#' of `s2s_final.csv`), or NULL if there are none. Scenes that could not be downloaded in this run
+#' of `s2s_final.csv`, including the processing baseline of each scene in `PROCESSING_BASELINE`, used
+#' to harmonise the reflectance offset of baseline 04.00 and later), or NULL if there are none. Scenes that could not be downloaded in this run
 #' are in `attr(result, "failed")`.
 #' @export
 #' @import rstac dplyr sf terra lubridate stringr parallel tibble readr ggplot2 future future.apply lwgeom
@@ -58,7 +71,19 @@ extract_sentinel2 <- function(aoi,
                             retry_rounds = 2,
                             retry_wait = 60,
                             http_retries = 10,
-                            http_retry_delay = 5) {
+                            http_retry_delay = 5,
+                            groups = NULL,
+                            max_per_month = NULL,
+                            min_clear = 0.1) {
+
+  # Only given scene groups: search over the period of their dates
+  if (!is.null(groups)) {
+    groups <- unique(as.character(groups))
+    g_dates <- lubridate::ymd(vapply(strsplit(groups, "_"), `[`, character(1), 3))
+    if (anyNA(g_dates)) stop("groups must be of the form <sat>_<tile>_<yyyymmdd>, e.g. S2A_T33WXR_20170903")
+    start_date <- as.character(min(g_dates) - 1)
+    end_date <- as.character(max(g_dates) + 1)
+  }
 
   # --- 1. PORTABLE PARALLEL SETUP (Final, Stable Version) ---
   # Check if running inside RStudio/RStudio Server (where multicore is unstable)
@@ -168,6 +193,7 @@ extract_sentinel2 <- function(aoi,
     dl <- extract_sentinel2_stac(workers = workers, start_date = start_date, end_date = end_date, months = months,
                                aoi = aoi, site_name = site_name, epsg = epsg, excl_groups = known,
                                sats = sats, area_sentinel2_dir = area_sentinel2_dir, minclouds = minclouds,
+                               groups = groups, max_per_month = max_per_month,
                                max_retries = max_retries, retry_rounds = retry_rounds, retry_wait = retry_wait,
                                http_retries = http_retries, http_retry_delay = http_retry_delay)
   }
@@ -178,7 +204,7 @@ extract_sentinel2 <- function(aoi,
 
   # s2s.csv: catalogue metadata of every downloaded scene (also of those later
   # rejected), accumulated over runs
-  meta_cols <- c("id", "file", "DATE_ACQUIRED", "CLOUD_COVER", "SUN_ELEVATION")
+  meta_cols <- c("id", "file", "DATE_ACQUIRED", "CLOUD_COVER", "SUN_ELEVATION", "PROCESSING_BASELINE")
   meta <- if (!is.null(dl$meta)) dl$meta %>% mutate(across(everything(), as.character)) else NULL
   if (file.exists(file.path(area_sentinel2_dir, "s2s.csv"))) {
     old_meta <- readr::read_csv(file.path(area_sentinel2_dir, "s2s.csv"), show_col_types = FALSE,
@@ -263,7 +289,7 @@ extract_sentinel2 <- function(aoi,
   s2s <- full_join(s2s %>% select(-ends_with("proportion")), s2cs, by = "file")
 
   # Mostly cloudy or empty images are deleted and recorded, so they are not downloaded again
-  rejected <- s2s %>% filter(is.na(clear_proportion) | clear_proportion < 0.1)
+  rejected <- s2s %>% filter(is.na(clear_proportion) | fill_proportion >= 0.99 | clear_proportion < min_clear)
   if (nrow(rejected) > 0) {
     unlink(file.path(area_sentinel2_dir, rejected$file))
     rej_file <- file.path(area_sentinel2_dir, "s2s_rejected.csv")
@@ -319,6 +345,7 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
                                    sats = c("S2A", "S2B", "S2C"),
                                    start_date, end_date, months = 1:12,
                                    minclouds, area_sentinel2_dir, workers,
+                                   groups = NULL, max_per_month = NULL,
                                    max_retries = 5, retry_rounds = 2, retry_wait = 60,
                                    http_retries = 10, http_retry_delay = 5) {
 
@@ -342,6 +369,9 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
                                   "B07", "B08", "B8A", "B09", "B11", "B12", "SCL")) %>%
     items_filter(filter_fn = function(x) { month(ymd_hms(x$properties$datetime)) %in% months }) %>%
     items_filter(filter_fn = function(x) { !feat_group(x) %in% excl_groups })
+  if (!is.null(groups)) {
+    it_obj <- it_obj %>% items_filter(filter_fn = function(x) { feat_group(x) %in% groups })
+  }
 
   if (length(it_obj$features) == 0) {
     print("No new Sentinel-2 scenes to download!")
@@ -361,6 +391,29 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
   }
 
   itst$area <- as.numeric(st_area(itst)) / (1000 * 1000)
+
+  # At most max_per_month scenes per calendar month (known scenes included): prefer scenes that
+  # cover the AOI, then low catalogue cloud cover
+  if (!is.null(max_per_month)) {
+    aoi_km2 <- as.numeric(st_area(aoi)) / (1000 * 1000)
+    known_dates <- suppressWarnings(ymd(vapply(strsplit(as.character(excl_groups), "_"), `[`, character(1), 3)))
+    known_mo <- table(factor(month(known_dates), levels = 1:12))
+    sel <- itst %>%
+      st_drop_geometry() %>%
+      mutate(.month = month(ymd_hms(datetime)),
+             .full = area >= 0.95 * aoi_km2,
+             .group = paste(platform, `s2:mgrs_tile`, as_date(ymd_hms(datetime)))) %>%
+      group_by(.month) %>%
+      arrange(desc(.full), `eo:cloud_cover`, .by_group = TRUE) %>%
+      # all items of a selected scene group are kept (they are mosaicked)
+      filter(.group %in% head(unique(.group), max(0, max_per_month - known_mo[as.character(.month[1])]))) %>%
+      ungroup()
+    itst <- itst %>% filter(`s2:granule_id` %in% sel$`s2:granule_id`)
+    if (nrow(itst) == 0) {
+      print("No new Sentinel-2 scenes to download (max_per_month reached)!")
+      return(list(meta = NULL, log = NULL))
+    }
+  }
 
   # Duplicate handling: group by date + platform + MGRS tile.
   tt <- itst %>%
@@ -426,7 +479,8 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
                           paste0("T", `s2:mgrs_tile`), "_",
                           date, "_", date2, "_",
                           time)) %>%
-    select(file, date, `eo:cloud_cover`, `view:sun_elevation`) %>%
+    mutate(PROCESSING_BASELINE = if ("s2:processing_baseline" %in% names(.)) as.character(`s2:processing_baseline`) else NA_character_) %>%
+    select(file, date, `eo:cloud_cover`, `view:sun_elevation`, PROCESSING_BASELINE) %>%
     rename(DATE_ACQUIRED = date,
            CLOUD_COVER   = `eo:cloud_cover`,
            SUN_ELEVATION = `view:sun_elevation`) %>%

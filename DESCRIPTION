@@ -35,7 +35,8 @@ Imports:
     zoo,
     ggplot2
 Suggests:
-    testthat (>= 3.0.0)
+    testthat (>= 3.0.0),
+    lightgbm (>= 4.0.0)
 Depends: 
     R (>= 3.5)
 Config/testthat/edition: 3

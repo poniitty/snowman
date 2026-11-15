@@ -243,10 +243,11 @@ calc_predictors <- function(image_df, site_name, base_landsat_dir, data_source =
       imagedf3 <- imagedf2 %>%
         filter(month == mo)
       
-      if (nrow(imagedf3) > 30) {
+      # up to the 50 clearest scenes per month, as in the models' training data
+      if (nrow(imagedf3) > 50) {
         imagedf3 <- imagedf3 %>%
           arrange(desc(clear_proportion)) %>%
-          slice_head(n = 30)
+          slice_head(n = 50)
       }
       
       rr <- lapply(imagedf3$file, function(x) {
@@ -336,10 +337,10 @@ calc_predictors <- function(image_df, site_name, base_landsat_dir, data_source =
     relocate(month, .after = date) %>%
     group_by(month) %>%
     arrange(desc(clear_proportion)) %>%
-    slice_head(n = 3) %>%
+    slice_head(n = 5) %>%
     ungroup()
   
-  if (nrow(imagedf2) < 15) {
+  if (nrow(imagedf2) < 20) {
     imagedf2 <- image_df %>%
       filter(fill_proportion < 0.8,
              cloud_proportion < 0.8) %>%
@@ -347,7 +348,7 @@ calc_predictors <- function(image_df, site_name, base_landsat_dir, data_source =
       relocate(month, .after = date) %>%
       group_by(month) %>%
       arrange(desc(clear_proportion)) %>%
-      slice_head(n = 3) %>%
+      slice_head(n = 5) %>%
       ungroup()
   }
   
