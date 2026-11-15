@@ -11,7 +11,8 @@ classify_sentinel2(
   model_file,
   workers = 1,
   force = FALSE,
-  chunk_cells = 250000
+  chunk_cells = 250000,
+  memmax = 2
 )
 }
 \arguments{
@@ -29,6 +30,9 @@ made with \code{\link[=s2_model]{s2_model()}} (random forest or LightGBM), or a 
 \item{force}{Logical, if TRUE also images classified earlier are classified again.}
 
 \item{chunk_cells}{Number of pixels predicted at a time (limits the memory use; default 250000).}
+
+\item{memmax}{Maximum memory (GB) terra may use per worker before it works through temporary files
+(default 2; see \code{\link[=calc_predictors_s2]{calc_predictors_s2()}}). Plan roughly \code{workers * (memmax + 2)} GB of memory.}
 }
 \value{
 The file names of the classified images.

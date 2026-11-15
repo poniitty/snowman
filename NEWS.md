@@ -38,6 +38,25 @@
 * `extract_sentinel2()` no longer fails on catalogue items without a `created` date (older scenes,
   e.g. 2017): the processing date in the file name then comes from the product generation time or
   the product name.
+* `extract_sentinel2()`: the tiles of one acquisition (satellite, date and time) are mosaicked into
+  one image when the AOI straddles MGRS tiles, so an acquisition is one observation (before, each
+  tile was a separate image and the ~10 km tile overlap was observed twice). Copies of one tile are
+  mosaicked the same way. Each pixel comes from one input image with all its bands and SCL (the
+  image with most valid pixels first); values are no longer averaged (averaging also mixed SCL class
+  codes). Scenes with and without the baseline 04.00 offset are not mixed. Merged tile images are
+  recorded in `s2s_merged.csv`. Images of earlier runs that were not mosaicked are mosaicked on the
+  next run.
+* `extract_sentinel2()`: two passes of one satellite on the same day (high latitudes) are separate
+  scenes (the scene key includes the time).
+* `extract_sentinel2()`: footprints are intersected with the AOI itself, not its bounding box in
+  degrees; tiles that do not reach the AOI (status NO_OVERLAP) are recorded and not retried (before,
+  they failed after five attempts in three rounds, delaying every run).
+* `extract_sentinel2(max_per_month = )` counts acquisitions (with all their tiles) and takes them in
+  turn from the different years, so that the scenes of the median images are spread over the years.
+* `calc_predictors_s2()`, `classify_sentinel2()`: new `memmax` limits terra's memory use. terra
+  estimates the free memory from the whole node, which on a shared HPC node is far more than a job
+  may use; R could crash when computing the median images. Intermediates are kept on disk. The
+  download workers of `extract_sentinel2()` are limited to 1 GB each in the same way.
 * `extract_sentinel2()` works with catalogue items that lack optional properties (`created`,
   `view:sun_elevation`, `s2:granule_id`, `eo:cloud_cover`; common for older scenes): items are
   identified by their item id, missing values are left NA, and file names are built by one function

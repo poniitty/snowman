@@ -12,7 +12,8 @@ calc_predictors_s2(
   n_indices = 5,
   median_mask = c(3, 8, 9, 10),
   index_mask = NULL,
-  force = FALSE
+  force = FALSE,
+  memmax = 4
 )
 }
 \arguments{
@@ -33,6 +34,10 @@ cirrus 10; the Landsat version masks the QA cloud bit). NULL masks nothing.}
 
 \item{force}{Logical, if TRUE all predictors are calculated again; otherwise the DEM/land cover part
 and the median part are skipped when their files exist.}
+
+\item{memmax}{Maximum memory (GB) terra may use before it works through temporary files (default 4).
+terra judges the free memory from the whole node, not from the job's memory limit, so without a
+limit it can exceed the memory of a Slurm job or RStudio session and crash R.}
 }
 \value{
 Invisibly, the predictor directory.

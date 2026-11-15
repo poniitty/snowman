@@ -100,11 +100,16 @@ s2_baseline <- function(image_df, file) {
 #' @param index_mask SCL classes masked in the median indices (default NULL: none, as for Landsat).
 #' @param force Logical, if TRUE all predictors are calculated again; otherwise the DEM/land cover part
 #' and the median part are skipped when their files exist.
+#' @param memmax Maximum memory (GB) terra may use before it works through temporary files (default 4).
+#' terra judges the free memory from the whole node, not from the job's memory limit, so without a
+#' limit it can exceed the memory of a Slurm job or RStudio session and crash R.
 #' @return Invisibly, the predictor directory.
 #' @export
 calc_predictors_s2 <- function(image_df, site_name, base_sentinel2_dir, max_per_month = 15,
                                n_indices = 5, median_mask = c(3, 8, 9, 10), index_mask = NULL,
-                               force = FALSE) {
+                               force = FALSE, memmax = 4) {
+  old_mem <- s2_terra_memory(memmax)
+  on.exit(terra::terraOptions(memmax = old_mem), add = TRUE)
   image_dir <- file.path(base_sentinel2_dir, site_name, "imagery")
   predictor_dir <- file.path(base_sentinel2_dir, site_name, "predictors")
   if (!dir.exists(predictor_dir)) dir.create(predictor_dir, recursive = TRUE)
@@ -152,8 +157,10 @@ calc_predictors_s2 <- function(image_df, site_name, base_sentinel2_dir, max_per_
         }
         f <- file.path(tmp_dir, sprintf("m%02d_%03d.tif", mo, k))
         terra::writeRaster(r, f, datatype = "INT2U", overwrite = TRUE)
+        rm(r); gc(verbose = FALSE)
         f
       }, character(1))
+      message("median image of month ", mo, " (", length(fs), " scenes)")
       st <- terra::rast(fs)
       med <- terra::rast(lapply(s2_refl, function(b) {
         terra::app(st[[which(names(st) == b)]], "median", na.rm = TRUE)
@@ -173,7 +180,9 @@ calc_predictors_s2 <- function(image_df, site_name, base_sentinel2_dir, max_per_
     if (any(has_na) && length(months) > 1) {
       approx_b <- lapply(s2_refl, function(b) {
         st <- terra::rast(lapply(meds, function(f) terra::rast(f)[[b]]))
-        suppressWarnings(terra::approximate(st, rule = 2, NArule = 2))
+        suppressWarnings(terra::approximate(st, rule = 2, NArule = 2,
+                                            filename = file.path(tmp_dir, paste0("approx_", b, ".tif")),
+                                            overwrite = TRUE))
       })
     }
     for (k in seq_along(months)) {
@@ -185,6 +194,7 @@ calc_predictors_s2 <- function(image_df, site_name, base_sentinel2_dir, max_per_
       mk <- s2_fill_na(mk, complete = TRUE)
       terra::writeRaster(round(mk), file.path(predictor_dir, paste0("medians2_", months[k], ".tif")),
                          datatype = "INT2U", overwrite = TRUE)
+      rm(mk); gc(verbose = FALSE)
     }
   }
 
@@ -196,6 +206,10 @@ calc_predictors_s2 <- function(image_df, site_name, base_sentinel2_dir, max_per_
       dplyr::arrange(dplyr::desc(clear_proportion)) %>%
       dplyr::slice_head(n = n_indices) %>%
       dplyr::ungroup()
+    tmp_dir_i <- file.path(predictor_dir, "tmp_indices")
+    dir.create(tmp_dir_i, showWarnings = FALSE)
+    on.exit(unlink(tmp_dir_i, recursive = TRUE), add = TRUE)
+    message("median indices from ", nrow(idf), " scenes")
     rr <- lapply(seq_len(nrow(idf)), function(k) {
       r <- read_sentinel2(idf$file[k], image_dir, s2_baseline(idf, idf$file[k]))
       scl <- r[["SCL"]]
@@ -214,7 +228,10 @@ calc_predictors_s2 <- function(image_df, site_name, base_sentinel2_dir, max_per_
       x <- c(terra::clamp(ndvi, -1, 1), terra::clamp(ndsi, -1, 1), terra::clamp(kbri, -1, 1), swm, bitm)
       names(x) <- c("ndvi", "ndsi", "kbri", "swm", "bitm")
       x[["swm"]][abs(x[["swm"]]) > 10] <- NA
-      x
+      f <- file.path(tmp_dir_i, sprintf("i_%03d.tif", k))   # on disk, not in memory
+      terra::writeRaster(x, f, overwrite = TRUE)
+      rm(r, x, ndvi, ndsi, kbri, swm, bitm, scl, snow); gc(verbose = FALSE)
+      terra::rast(f)
     })
     pick <- function(nm, fun) {
       st <- terra::rast(lapply(rr, function(x) x[[nm]]))
@@ -226,6 +243,15 @@ calc_predictors_s2 <- function(image_df, site_name, base_sentinel2_dir, max_per_
     terra::writeRaster(round(mi, 4), mi_file, overwrite = TRUE)
   }
   invisible(predictor_dir)
+}
+
+# Internal: limit terra's memory use (GB); returns the previous setting. terra estimates the free
+# memory from the whole node, which on a shared HPC node is far more than the job may use.
+s2_terra_memory <- function(memmax) {
+  old <- terra::terraOptions(print = FALSE)$memmax
+  if (is.null(old) || length(old) == 0) old <- -1
+  if (!is.null(memmax) && is.finite(memmax) && memmax > 0) terra::terraOptions(memmax = memmax)
+  old
 }
 
 # Internal: DEM, slope and ESA WorldCover on the 10 m image grid
@@ -523,10 +549,12 @@ s2_pair_names <- function(nms) s2_pairs(nms)$name
 #' @param workers Number of images classified in parallel.
 #' @param force Logical, if TRUE also images classified earlier are classified again.
 #' @param chunk_cells Number of pixels predicted at a time (limits the memory use; default 250000).
+#' @param memmax Maximum memory (GB) terra may use per worker before it works through temporary files
+#' (default 2; see [calc_predictors_s2()]). Plan roughly `workers * (memmax + 2)` GB of memory.
 #' @return The file names of the classified images.
 #' @export
 classify_sentinel2 <- function(image_df, site_name, base_sentinel2_dir, model_file, workers = 1,
-                               force = FALSE, chunk_cells = 250000) {
+                               force = FALSE, chunk_cells = 250000, memmax = 2) {
   image_dir <- file.path(base_sentinel2_dir, site_name, "imagery")
   predictor_dir <- file.path(base_sentinel2_dir, site_name, "predictors")
   class_dir <- file.path(base_sentinel2_dir, site_name, "classifications")
@@ -542,7 +570,8 @@ classify_sentinel2 <- function(image_df, site_name, base_sentinel2_dir, model_fi
 
   run_one <- function(f, paral) {
     safe_classify_s2(f, image_df = image_df, image_dir = image_dir, predictor_dir = predictor_dir,
-                     class_dir = class_dir, mod = mod, chunk_cells = chunk_cells, paral = paral)
+                     class_dir = class_dir, mod = mod, chunk_cells = chunk_cells, paral = paral,
+                     memmax = memmax)
   }
   if (workers <= 1 || nrow(image_df) <= 2) {
     lss <- lapply(image_df$file, run_one, paral = FALSE)
@@ -567,7 +596,9 @@ safe_classify_s2 <- function(f, ...) {
 
 # Internal: classify one image in chunks of rows
 classify_s2_image <- function(f, image_df, image_dir, predictor_dir, class_dir, mod, chunk_cells = 250000,
-                              paral = TRUE) {
+                              paral = TRUE, memmax = 2) {
+  old_mem <- s2_terra_memory(memmax)
+  on.exit(terra::terraOptions(memmax = old_mem), add = TRUE)
   if (paral) {
     terra::terraOptions(threads = 1)
     options(rf.cores = 1, mc.cores = 1)

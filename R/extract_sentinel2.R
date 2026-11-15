@@ -182,7 +182,8 @@ extract_sentinel2 <- function(aoi,
 
   # Scenes that need no download (see the function description), and the scene
   # table of earlier runs, to which new scenes are added
-  known <- known_groups(area_sentinel2_dir, "s2s_final.csv", "s2s_rejected.csv", sensor = "sentinel2")
+  known <- known_groups(area_sentinel2_dir, "s2s_final.csv", c("s2s_rejected.csv", "s2s_merged.csv"),
+                        sensor = "sentinel2")
   final_file <- file.path(area_sentinel2_dir, "s2s_final.csv")
   prev_final <- if (file.exists(final_file)) {
     readr::read_csv(final_file, show_col_types = FALSE, col_types = readr::cols(.default = "c"))
@@ -201,6 +202,15 @@ extract_sentinel2 <- function(aoi,
   write_download_log(dl$log, area_sentinel2_dir)
   report_downloads(dl$log, length(known), area_sentinel2_dir)
   failed <- if (is.null(dl$log)) NULL else dl$log %>% filter(status %in% c("ERROR", "BROKEN"))
+  # tiles that do not reach the AOI are recorded as rejected, so they are not searched for again
+  no_ov <- if (is.null(dl$log)) NULL else dl$log %>% filter(status == "NO_OVERLAP")
+  if (!is.null(no_ov) && nrow(no_ov) > 0) {
+    rej_file <- file.path(area_sentinel2_dir, "s2s_rejected.csv")
+    write_csv(parse_s2_files(tibble(file = no_ov$file), site_name) %>%
+                transmute(file, date, satid, fill_proportion = 1, cloud_proportion = NA, clear_proportion = 0) %>%
+                mutate(across(everything(), as.character)),
+              rej_file, append = file.exists(rej_file))
+  }
 
   # s2s.csv: catalogue metadata of every downloaded scene (also of those later
   # rejected), accumulated over runs
@@ -219,6 +229,19 @@ extract_sentinel2 <- function(aoi,
   # --- 5. NEW IMAGES: on disk but not yet in the final scene table ---
   tifs <- list.files(area_sentinel2_dir, pattern = "GMT.tif$")
   new_files <- setdiff(tifs, prev_final$file)
+  # Images of the same acquisition (several tiles) are mosaicked into one (step 7). Earlier images of
+  # an acquisition with a new tile image, and earlier images that were never mosaicked (downloaded by
+  # older versions), are processed again with them.
+  if (!is.null(prev_final)) {
+    on_disk <- intersect(prev_final$file, tifs)
+    cand <- c(new_files, on_disk)
+    acq_k <- s2_acquisition_key(cand, meta)
+    redo <- intersect(on_disk, cand[acq_k %in% acq_k[duplicated(acq_k)]])
+    if (length(redo) > 0) {
+      new_files <- c(new_files, redo)
+      prev_final <- prev_final %>% filter(!file %in% redo)
+    }
+  }
   if (length(new_files) == 0) {
     if (is.null(prev_final)) {
       print("Zero Sentinel-2 scenes found or downloaded!")
@@ -252,28 +275,42 @@ extract_sentinel2 <- function(aoi,
   }
 
   # --- 7. MOSAICKING ---
-  # Each Sentinel-2 MGRS tile is geometrically unique, so mosaicking normally only
-  # arises when the AOI straddles two tiles acquired on the same orbit pass.
-  s2s_d <- s2s %>% group_by(date, satid, tile) %>% count %>% filter(n > 1) %>% ungroup()
-  if (nrow(s2s_d) > 0) {
-    for (ii in seq_len(nrow(s2s_d))) {
-      s2s_dd <- s2s_d %>% slice(ii)
-      s2s_dd <- right_join(s2s, s2s_dd, by = join_by(satid, tile, date))
-
-      rs <- lapply(s2s_dd$file, function(x) {
+  # The tiles of one acquisition (satellite, date and time; the AOI may straddle MGRS tiles, which
+  # overlap by ~10 km) and copies of one tile are mosaicked into one image, so that an acquisition is
+  # one observation. Each pixel comes from one input image only, all bands and the SCL together (the
+  # image with the most valid pixels first, the others fill its gaps); values are never averaged.
+  # Tiles with and without the +1000 offset of processing baseline 04.00 are not mixed. The image
+  # keeps the name of the first input; the others are deleted and recorded in s2s_merged.csv, so that
+  # they are not downloaded again.
+  s2s$.acq <- s2_acquisition_key(s2s$file, meta)
+  dup_acq <- unique(s2s$.acq[duplicated(s2s$.acq)])
+  if (length(dup_acq) > 0) {
+    merged_log <- list()
+    for (k in dup_acq) {
+      fs <- s2s$file[s2s$.acq == k]
+      nvalid <- vapply(fs, function(x) {
+        r <- rast(file.path(area_sentinel2_dir, x))[["B04"]]
+        as.numeric(terra::global(!is.na(r) & r > 0, "sum", na.rm = TRUE)[1, 1])
+      }, numeric(1))
+      fs <- fs[order(-nvalid)]
+      rs <- lapply(fs, function(x) {
         r <- rast(file.path(area_sentinel2_dir, x))
-        r[r == 0] <- NA
-        return(r)
+        terra::mask(r, r[["B04"]], maskvalues = c(NA, 0))   # a pixel without data is empty in all bands
       })
-
-      rs <- sprc(rs)
-      rs <- mosaic(rs) %>% round()
-      writeRaster(rs, file.path(area_sentinel2_dir, s2s_dd$file[[1]]),
-                  overwrite = TRUE, datatype = "INT2U")
-      unlink(file.path(area_sentinel2_dir, s2s_dd$file[2:nrow(s2s_dd)]))
-      s2s <- s2s %>% filter(!file %in% s2s_dd$file[2:nrow(s2s_dd)])
+      rs <- terra::mosaic(terra::sprc(rs), fun = "first")
+      tmp <- file.path(area_sentinel2_dir, paste0(fs[1], ".part"))
+      writeRaster(rs, tmp, filetype = "GTiff", overwrite = TRUE, datatype = "INT2U", NAflag = 0)
+      file.rename(tmp, file.path(area_sentinel2_dir, fs[1]))
+      unlink(file.path(area_sentinel2_dir, fs[-1]))
+      merged_log[[k]] <- tibble(file = fs[-1], merged_into = fs[1])
+      s2s <- s2s %>% filter(!file %in% fs[-1])
     }
+    merged_log <- bind_rows(merged_log)
+    mfile <- file.path(area_sentinel2_dir, "s2s_merged.csv")
+    write_csv(merged_log, mfile, append = file.exists(mfile))
+    message(nrow(merged_log), " tile image(s) mosaicked into ", length(dup_acq), " acquisition(s)")
   }
+  s2s$.acq <- NULL
 
   # --- 8. CALC COVERAGES (FUTURE APPLY) ---
   s2cs <- future.apply::future_lapply(
@@ -352,11 +389,16 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
   # Search (all pages, retried if the API is busy)
   it_obj <- stac_search_all("sentinel-2-l2a", aoi, start_date, end_date)
 
-  # scene group of a catalogue item, in the same form as group_from_file()
+  # scene group of a catalogue item <sat>_<tile>_<date> (the form of the `groups` argument), and its
+  # key <sat>_<tile>_<date>_<time> in the same form as group_from_file() (the time separates two
+  # passes of one satellite on the same day, which happen at high latitudes)
   # (s2:mgrs_tile is stored without the leading "T")
   feat_group <- function(x) {
     paste(s2_short(x$properties$platform), paste0("T", x$properties$`s2:mgrs_tile`),
           gsub("-", "", substr(x$properties$datetime, 1, 10)), sep = "_")
+  }
+  feat_key <- function(x) {
+    paste(feat_group(x), gsub(":", "", substr(x$properties$datetime, 12, 19)), sep = "_")
   }
 
   # Filter by cloud cover, platform, months, and already-known scenes.
@@ -368,7 +410,7 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
     assets_select(asset_names = c("B01", "B02", "B03", "B04", "B05", "B06",
                                   "B07", "B08", "B8A", "B09", "B11", "B12", "SCL")) %>%
     items_filter(filter_fn = function(x) { month(ymd_hms(x$properties$datetime)) %in% months }) %>%
-    items_filter(filter_fn = function(x) { !feat_group(x) %in% excl_groups })
+    items_filter(filter_fn = function(x) { !feat_key(x) %in% excl_groups })
   if (!is.null(groups)) {
     it_obj <- it_obj %>% items_filter(filter_fn = function(x) { feat_group(x) %in% groups })
   }
@@ -385,9 +427,15 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
       # created or view:sun_elevation are missing from some older items)
       itst$.item_id <- vapply(it_obj$features, function(x) as.character(x$id), character(1))
       for (nm in c("eo:cloud_cover", "view:sun_elevation")) if (!nm %in% names(itst)) itst[[nm]] <- NA_real_
-      itst <- st_crop(itst, aoi %>% st_transform(st_crs(itst)))
+      # the part of each footprint inside the AOI itself (cropping with the AOI's bounding box in
+      # degrees kept tiles that only touch the box's corners; their download then failed)
+      sf::sf_use_s2(FALSE)
+      itst <- st_intersection(itst, st_geometry(aoi %>% st_transform(st_crs(itst))))
+      itst <- itst[!st_is_empty(itst), ]
+      sf::sf_use_s2(TRUE)
     })
   })
+  itst <- itst[as.numeric(st_area(itst)) > 1e4, ]   # at least 0.01 km2 of the AOI
 
   if (nrow(itst) == 0) {
     print("No new Sentinel-2 scenes to download!")
@@ -396,33 +444,48 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
 
   itst$area <- as.numeric(st_area(itst)) / (1000 * 1000)
 
-  # At most max_per_month scenes per calendar month (known scenes included): prefer scenes that
-  # cover the AOI, then low catalogue cloud cover
+  # At most max_per_month acquisitions per calendar month (known ones included). The unit is an
+  # acquisition (satellite + date + time), with all its tiles (they are mosaicked). Within a month,
+  # acquisitions are taken in turn from the different years (so that the medians do not come from a
+  # few years only); within a year, those covering most of the AOI and with the lowest catalogue
+  # cloud cover first.
   if (!is.null(max_per_month)) {
     aoi_km2 <- as.numeric(st_area(aoi)) / (1000 * 1000)
-    known_dates <- suppressWarnings(ymd(vapply(strsplit(as.character(excl_groups), "_"), `[`, character(1), 3)))
+    kp <- strsplit(as.character(excl_groups), "_")
+    known_acq <- unique(vapply(kp, function(z) paste(z[1], z[3], if (length(z) >= 4) z[4] else ""), character(1)))
+    known_dates <- suppressWarnings(ymd(vapply(strsplit(known_acq, " "), `[`, character(1), 2)))
     known_mo <- table(factor(month(known_dates), levels = 1:12))
-    sel <- itst %>%
+    acq <- itst %>%
       st_drop_geometry() %>%
-      mutate(.month = month(ymd_hms(datetime)),
-             .full = area >= 0.95 * aoi_km2,
-             .group = paste(platform, `s2:mgrs_tile`, as_date(ymd_hms(datetime)))) %>%
+      mutate(.acq = paste(platform, substr(datetime, 1, 10), substr(datetime, 12, 19))) %>%
+      group_by(.acq) %>%
+      summarise(.month = month(ymd_hms(datetime[1])), .year = year(ymd_hms(datetime[1])),
+                .cover = min(1, sum(area) / aoi_km2), .cc = mean(`eo:cloud_cover`, na.rm = TRUE),
+                .groups = "drop") %>%
+      mutate(.cc = ifelse(is.na(.cc), 100, .cc),
+             .covclass = cut(.cover, c(-Inf, 0.5, 0.9, Inf), labels = FALSE)) %>%
+      group_by(.month, .year) %>%
+      arrange(desc(.covclass), .cc, .by_group = TRUE) %>%
+      mutate(.rank = row_number(), .best = min(.cc)) %>%
       group_by(.month) %>%
-      arrange(desc(.full), `eo:cloud_cover`, .by_group = TRUE) %>%
-      # all items of a selected scene group are kept (they are mosaicked)
-      filter(.group %in% head(unique(.group), max(0, max_per_month - known_mo[as.character(.month[1])]))) %>%
+      arrange(.rank, .best, .by_group = TRUE) %>%
+      filter(row_number() <= max(0, max_per_month - known_mo[as.character(.month[1])])) %>%
       ungroup()
-    itst <- itst %>% filter(.item_id %in% sel$.item_id)
+    itst <- itst %>%
+      mutate(.acq = paste(platform, substr(datetime, 1, 10), substr(datetime, 12, 19))) %>%
+      filter(.acq %in% acq$.acq) %>%
+      select(-.acq)
     if (nrow(itst) == 0) {
       print("No new Sentinel-2 scenes to download (max_per_month reached)!")
       return(list(meta = NULL, log = NULL))
     }
   }
 
-  # Duplicate handling: group by date + platform + MGRS tile.
+  # Duplicate handling: items of the same tile and acquisition (satellite, date and time), e.g. copies
+  # of one scene with different processing baselines
   tt <- itst %>%
-    mutate(date = as_date(ymd_hms(datetime))) %>%
-    group_by(date, platform, `s2:mgrs_tile`, .add = TRUE) %>%
+    mutate(date = as_date(ymd_hms(datetime)), .time = substr(datetime, 12, 19)) %>%
+    group_by(date, .time, platform, `s2:mgrs_tile`, .add = TRUE) %>%
     mutate(n = n()) %>%
     arrange(desc(n)) %>% mutate(gid = cur_group_id()) %>% group_split()
 
@@ -543,6 +606,9 @@ process_feature_s2 <- function(ft, area_sentinel2_dir, aoi, exte, reso,
     paste0("/vsicurl", "?pc_url_signing=yes", "&pc_collection=sentinel-2-l2a", "&url=", base_url)
   }
   Sys.setenv(GDAL_HTTP_MAX_RETRY = http_retries, GDAL_HTTP_RETRY_DELAY = http_retry_delay)
+  # terra judges free memory from the whole node, not the job's limit: with many workers each
+  # holding whole 10 m scenes in memory, R sessions were killed. Larger rasters go via temporary files.
+  terra::terraOptions(memmax = 1)
 
   # Build output file name ---------------------------------------------------
   # Format: S2A_MSIL2A_T33VWF_20210101_20210101_100031GMT.tif
@@ -589,6 +655,9 @@ process_feature_s2 <- function(ft, area_sentinel2_dir, aoi, exte, reso,
       # with the AOI let crop() snap to the nearest pixel edge, which could drop the template's
       # outermost rows or columns; those pixels stayed empty.)
       cut0 <- terra::as.polygons(terra::ext(template), crs = terra::crs(template))
+      # a tile whose data do not reach the AOI: nothing to download (not an error, not retried)
+      ce1 <- terra::ext(terra::project(cut0, terra::crs(r_list[[1]])))
+      if (is.null(terra::intersect(terra::ext(r_list[[1]]), ce1))) stop("NO_OVERLAP")
       r_final  <- terra::rast(lapply(r_list, function(r) {
         cut_ext <- terra::ext(terra::project(cut0, terra::crs(r))) + 2 * max(terra::res(r))
         r_cropped <- terra::crop(r, cut_ext, snap = "out")
@@ -616,6 +685,7 @@ process_feature_s2 <- function(ft, area_sentinel2_dir, aoi, exte, reso,
 
     if (!inherits(e, "try-error")) return(out("SUCCESS", iii))
     err <- trimws(as.character(e))
+    if (grepl("NO_OVERLAP", err)) { unlink(tmp_file); return(out("NO_OVERLAP", iii, "the tile does not reach the AOI")) }
     unlink(tmp_file)
     if (iii < max_retries) Sys.sleep(min(300, 5 * 2^(iii - 1)) * stats::runif(1, 0.75, 1.25))
   }
@@ -631,6 +701,7 @@ process_feature_s2 <- function(ft, area_sentinel2_dir, aoi, exte, reso,
 #   9  = Cloud high probability
 #   10 = Thin cirrus
 calc_coverages_s2 <- function(image, image_dir) {
+  terra::terraOptions(memmax = 1)
 
   fpath <- file.path(image_dir, image)
 
@@ -720,4 +791,20 @@ s2_item_file <- function(ft) {
   date2 <- s2_procdate(p$created, p$`s2:generation_time`, p$`s2:product_uri`, p$datetime)
   time  <- paste0(gsub(":", "", substr(p$datetime, 12, 19)), "GMT.tif")
   paste0(platform_short, "_MSIL2A_", tile, "_", date, "_", date2, "_", time)
+}
+
+# Internal: acquisition key of image files: satellite, date, time and whether the scene has the
+# +1000 reflectance offset (images with the same key are mosaicked). meta: the s2s.csv table (for the
+# processing baseline), or NULL.
+s2_acquisition_key <- function(files, meta = NULL) {
+  if (!length(files)) return(character(0))
+  p <- strsplit(basename(files), "_")
+  base <- if (!is.null(meta) && "PROCESSING_BASELINE" %in% names(meta)) {
+    meta$PROCESSING_BASELINE[match(files, meta$file)]
+  } else rep(NA, length(files))
+  off <- vapply(seq_along(files), function(i) s2_needs_offset(files[i], base[i]), logical(1))
+  vapply(seq_along(p), function(i) {
+    z <- p[[i]]
+    paste(z[1], z[4], if (length(z) >= 6) sub("GMT.tif$", "", z[6]) else "", off[i], sep = "_")
+  }, character(1))
 }

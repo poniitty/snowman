@@ -50,8 +50,9 @@ group_from_file <- function(files, sensor = c("landsat", "sentinel2")) {
   p <- strsplit(basename(files), "_")
   vapply(p, function(z) {
     if (length(z) < 4) return(NA_character_)
-    unit <- if (sensor == "landsat") substr(z[3], 1, 3) else z[3]
-    paste(z[1], unit, z[4], sep = "_")
+    if (sensor == "landsat") return(paste(z[1], substr(z[3], 1, 3), z[4], sep = "_"))
+    # Sentinel-2: <sat>_<tile>_<date>_<time> (one satellite can pass twice a day at high latitudes)
+    paste(z[1], z[3], z[4], if (length(z) >= 6) sub("GMT.tif$", "", z[6]) else "", sep = "_")
   }, character(1))
 }
 
