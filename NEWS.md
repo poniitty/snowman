@@ -38,6 +38,10 @@
 * `extract_sentinel2()` no longer fails on catalogue items without a `created` date (older scenes,
   e.g. 2017): the processing date in the file name then comes from the product generation time or
   the product name.
+* `extract_sentinel2()` works with catalogue items that lack optional properties (`created`,
+  `view:sun_elevation`, `s2:granule_id`, `eo:cloud_cover`; common for older scenes): items are
+  identified by their item id, missing values are left NA, and file names are built by one function
+  for both the download and the scene table.
 * `extract_sentinel2()`: fixed "subscript out of bounds" when taking the pixel grid from a scene's
   B04 band (`rstac::assets_url()` returns unnamed URLs).
 

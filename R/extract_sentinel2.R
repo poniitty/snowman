@@ -363,7 +363,7 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
   # Band selection: 12 reflectance bands + SCL (Scene Classification Layer = QA equivalent).
   # All bands are resampled to 10 m during download (see process_feature_s2).
   it_obj <- it_obj %>%
-    items_filter(filter_fn = function(x) { x$properties$`eo:cloud_cover` < minclouds }) %>%
+    items_filter(filter_fn = function(x) { cc <- x$properties$`eo:cloud_cover`; is.null(cc) || isTRUE(cc < minclouds) }) %>%
     items_filter(filter_fn = function(x) { isTRUE(s2_short(x$properties$platform) %in% sats) }) %>%
     assets_select(asset_names = c("B01", "B02", "B03", "B04", "B05", "B06",
                                   "B07", "B08", "B8A", "B09", "B11", "B12", "SCL")) %>%
@@ -381,6 +381,10 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
   suppressMessages({
     suppressWarnings({
       itst <- items_as_sf(it_obj) %>% st_make_valid()
+      # the item id identifies a scene item (every item has one; properties such as s2:granule_id,
+      # created or view:sun_elevation are missing from some older items)
+      itst$.item_id <- vapply(it_obj$features, function(x) as.character(x$id), character(1))
+      for (nm in c("eo:cloud_cover", "view:sun_elevation")) if (!nm %in% names(itst)) itst[[nm]] <- NA_real_
       itst <- st_crop(itst, aoi %>% st_transform(st_crs(itst)))
     })
   })
@@ -408,7 +412,7 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
       # all items of a selected scene group are kept (they are mosaicked)
       filter(.group %in% head(unique(.group), max(0, max_per_month - known_mo[as.character(.month[1])]))) %>%
       ungroup()
-    itst <- itst %>% filter(`s2:granule_id` %in% sel$`s2:granule_id`)
+    itst <- itst %>% filter(.item_id %in% sel$.item_id)
     if (nrow(itst) == 0) {
       print("No new Sentinel-2 scenes to download (max_per_month reached)!")
       return(list(meta = NULL, log = NULL))
@@ -443,13 +447,13 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
     })
   })
 
-  # s2:granule_id is the unique scene identifier (analogous to landsat:scene_id)
+  # the item id is the unique scene identifier (analogous to landsat:scene_id)
   itst <- itst %>%
-    filter(`s2:granule_id` %in% (tt %>% pull(`s2:granule_id`)))
+    filter(.item_id %in% (tt %>% pull(.item_id)))
 
   it_obj <- it_obj %>%
     items_filter(filter_fn = function(x) {
-      x$properties$`s2:granule_id` %in% (itst %>% pull(`s2:granule_id`))
+      as.character(x$id) %in% (itst %>% pull(.item_id))
     })
 
   # all remaining items can be dropped by the duplicate handling (e.g. a re-run in which the only
@@ -473,16 +477,13 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
   ok_files <- res$file[res$status %in% c("SUCCESS", "EXISTS")]
   # catalogue properties that not all items have (e.g. older scenes have no "created")
   prop <- function(nm) if (nm %in% names(itst)) itst[[nm]] else NULL
-  itst$.date2 <- s2_procdate(prop("created"), prop("s2:generation_time"), prop("s2:product_uri"), itst$datetime)
   itst$.baseline <- s2_baseline_prop(prop("s2:processing_baseline"), prop("s2:product_uri"), nrow(itst))
+  # file names exactly as process_feature_s2() writes them
+  item_files <- setNames(vapply(it_obj$features, s2_item_file, character(1)),
+                         vapply(it_obj$features, function(x) as.character(x$id), character(1)))
   idsALL <- itst %>%
     mutate(date  = gsub("-", "", as_date(ymd_hms(datetime)))) %>%
-    mutate(date2 = .date2) %>%
-    mutate(time  = paste0(gsub(":", "", substr(datetime, 12, 19)), "GMT.tif")) %>%
-    mutate(file  = paste0(platform, "_MSIL2A_",
-                          paste0("T", `s2:mgrs_tile`), "_",
-                          date, "_", date2, "_",
-                          time)) %>%
+    mutate(file  = unname(item_files[.item_id])) %>%
     mutate(PROCESSING_BASELINE = .baseline) %>%
     select(file, date, `eo:cloud_cover`, `view:sun_elevation`, PROCESSING_BASELINE) %>%
     rename(DATE_ACQUIRED = date,
@@ -545,15 +546,7 @@ process_feature_s2 <- function(ft, area_sentinel2_dir, aoi, exte, reso,
 
   # Build output file name ---------------------------------------------------
   # Format: S2A_MSIL2A_T33VWF_20210101_20210101_100031GMT.tif
-  platform_short <- unname(c("Sentinel-2A" = "S2A", "Sentinel-2B" = "S2B", "Sentinel-2C" = "S2C",
-                             "Sentinel-2D" = "S2D")[ft$properties$platform])
-  tile  <- paste0("T", ft$properties$`s2:mgrs_tile`)              # prepend "T" (e.g. T33VWF)
-  date  <- gsub("-", "", substr(ft$properties$datetime, 1, 10))   # acquisition date
-  date2 <- s2_procdate(ft$properties$created, ft$properties$`s2:generation_time`,   # processing date
-                       ft$properties$`s2:product_uri`, ft$properties$datetime)
-  time  <- paste0(gsub(":", "", substr(ft$properties$datetime, 12, 19)), "GMT.tif")
-
-  nm <- paste0(platform_short, "_MSIL2A_", tile, "_", date, "_", date2, "_", time)
+  nm <- s2_item_file(ft)
   out <- function(status, attempts, msg = "") {
     dplyr::tibble(file = nm, status = status, attempts = as.integer(attempts), message = substr(msg, 1, 500))
   }
@@ -714,4 +707,17 @@ s2_baseline_prop <- function(baseline, product_uri, n) {
   from_uri <- ifelse(is.na(m[, 2]), NA_character_, paste0(m[, 2], ".", m[, 3]))
   b[is.na(b) | !nzchar(b)] <- from_uri[is.na(b) | !nzchar(b)]
   b
+}
+
+# Internal: output file name of a catalogue item:
+# <sat>_MSIL2A_<tile>_<acquisition date>_<processing date>_<time>GMT.tif
+s2_item_file <- function(ft) {
+  p <- ft$properties
+  platform_short <- unname(c("Sentinel-2A" = "S2A", "Sentinel-2B" = "S2B", "Sentinel-2C" = "S2C",
+                             "Sentinel-2D" = "S2D")[p$platform])
+  tile  <- paste0("T", p$`s2:mgrs_tile`)
+  date  <- gsub("-", "", substr(p$datetime, 1, 10))
+  date2 <- s2_procdate(p$created, p$`s2:generation_time`, p$`s2:product_uri`, p$datetime)
+  time  <- paste0(gsub(":", "", substr(p$datetime, 12, 19)), "GMT.tif")
+  paste0(platform_short, "_MSIL2A_", tile, "_", date, "_", date2, "_", time)
 }
