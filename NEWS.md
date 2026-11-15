@@ -2,6 +2,12 @@
 
 ## Downloads (`extract_landsat()`, `extract_sentinel2()`)
 
+* Images now cover the whole AOI grid: each scene is cut with the snapped AOI grid
+  extent (plus 2 pixels) instead of the AOI itself. Before, `crop()` snapped the cut
+  to the nearest pixel edge, so the outermost row or column was left empty on each
+  side where the AOI edge lay more than half a pixel inside the grid edge; the
+  cloud-mask step of `calc_snow_variables()` widened this to 2 pixels without snow
+  variables. Images downloaded earlier keep the empty edges.
 * Robust to throttling by the Planetary Computer: GDAL retries failed HTTP
   requests (`http_retries`, `http_retry_delay`), each scene is attempted up to
   `max_retries` times with growing waits (with jitter, so parallel workers do not

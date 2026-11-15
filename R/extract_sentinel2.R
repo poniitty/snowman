@@ -532,8 +532,13 @@ process_feature_s2 <- function(ft, area_sentinel2_dir, aoi, exte, reso,
       # This uniformly resamples 20 m bands (B05-B07, B8A, B11, B12, SCL) and
       # 60 m bands (B01, B09) to 10 m using nearest-neighbour, matching B02-B04/B08.
       template <- terra::rast(extent = terra::ext(exte), resolution = reso, crs = sf::st_crs(aoi)$wkt)
+      # Each band is cut with the template's extent plus 2 of its own pixels, snapped outward. (Cutting
+      # with the AOI let crop() snap to the nearest pixel edge, which could drop the template's
+      # outermost rows or columns; those pixels stayed empty.)
+      cut0 <- terra::as.polygons(terra::ext(template), crs = terra::crs(template))
       r_final  <- terra::rast(lapply(r_list, function(r) {
-        r_cropped <- terra::crop(r, sf::st_transform(aoi, sf::st_crs(r)))
+        cut_ext <- terra::ext(terra::project(cut0, terra::crs(r))) + 2 * max(terra::res(r))
+        r_cropped <- terra::crop(r, cut_ext, snap = "out")
         terra::project(r_cropped, template, method = "near")
       }))
 

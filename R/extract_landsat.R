@@ -539,7 +539,12 @@ process_feature <- function(ft, area_landsat_dir, aoi, exte, reso,
       # Alignment Step: Use Numeric Template to force exact Grid
       template <- terra::rast(extent = terra::ext(exte), resolution = reso, crs = sf::st_crs(aoi)$wkt)
 
-      r_cropped <- terra::crop(r_remote, sf::st_transform(aoi, sf::st_crs(r_remote)))
+      # Cut the scene with the template's extent plus 2 pixels, snapped outward. (Cutting with the
+      # AOI let crop() snap to the nearest pixel edge, which dropped the template's outermost row or
+      # column wherever the AOI edge lay more than half a pixel inside it; those pixels stayed empty.)
+      cut_ext <- terra::ext(terra::project(terra::as.polygons(terra::ext(template), crs = terra::crs(template)),
+                                       terra::crs(r_remote))) + 2 * reso
+      r_cropped <- terra::crop(r_remote, cut_ext, snap = "out")
       r_final <- terra::project(r_cropped, template, method = "near")
 
       # Metadata formatting
