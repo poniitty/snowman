@@ -62,7 +62,9 @@
   (by the catalogue footprints; MGRS tiles overlap widely near UTM zone edges, so one tile often
   covers a site that touches two). After the download the decision is checked against the data:
   if the downloaded tiles leave more than 0.5% of the AOI without valid pixels, the skipped tiles of
-  that acquisition are downloaded too.
+  that acquisition are downloaded too. Of several processings of the same tile and acquisition (the
+  catalogue keeps reprocessed versions, e.g. 2022-2023 scenes reprocessed in 2024), only the newest
+  is downloaded; older ones only if a gap remains after the other tiles.
 * `extract_sentinel2()`: two passes of one satellite on the same day (high latitudes) are separate
   scenes (the scene key includes the time).
 * `extract_sentinel2()`: footprints are intersected with the AOI itself, not its bounding box in

@@ -456,10 +456,25 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
                    vapply(it_obj$features, function(x) as.character(x$id), character(1)))
     itst$.epsg_ok <- ep[itst$.item_id] %in% epsg
     acq_id <- paste(itst$platform, substr(itst$datetime, 1, 10), substr(itst$datetime, 12, 19))
+    # Copies of the same tile and acquisition (the catalogue keeps reprocessed versions, e.g. of 2022
+    # scenes reprocessed in 2024): only the newest processing is considered here; the older copies are
+    # downloaded only if the check after the download finds the AOI incompletely covered.
+    prop0 <- function(nm) if (nm %in% names(itst)) itst[[nm]] else NULL
+    base_num <- suppressWarnings(as.numeric(s2_baseline_prop(prop0("s2:processing_baseline"),
+                                                             prop0("s2:product_uri"), nrow(itst))))
+    pdate <- suppressWarnings(as.numeric(s2_procdate(prop0("created"), prop0("s2:generation_time"),
+                                                     prop0("s2:product_uri"), itst$datetime)))
+    copy_key <- paste(acq_id, itst$`s2:mgrs_tile`)
+    newest <- vapply(seq_len(nrow(itst)), function(i) {
+      ix <- which(copy_key == copy_key[i])
+      ix[order(-ifelse(is.na(base_num[ix]), -1, base_num[ix]), -ifelse(is.na(pdate[ix]), 0, pdate[ix]))][1] == i
+    }, logical(1))
+    n_old <- sum(!newest)
+    if (n_old > 0) message(n_old, " older processing(s) of a tile left out (the newest version of each is used)")
     geo <- st_geometry(itst)
     suppressMessages(suppressWarnings({
       sf::sf_use_s2(FALSE)
-      keep <- unlist(lapply(split(seq_len(nrow(itst)), acq_id), function(ix) {
+      keep <- unlist(lapply(split(which(newest), acq_id[newest]), function(ix) {
         if (length(ix) == 1) return(ix)
         ix <- ix[order(-round(itst$area[ix] / aoi_km2_all, 3), !itst$.epsg_ok[ix])]
         chosen <- ix[1]
@@ -473,9 +488,10 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
       }))
       sf::sf_use_s2(TRUE)
     }))
-    n_skip <- nrow(itst) - length(keep)
+    n_skip <- sum(newest) - length(keep)
     if (n_skip > 0) message(n_skip, " tile(s) not needed: the AOI is covered by the other tiles of the same acquisition")
     itst$.epsg_ok <- NULL
+    itst$.newest <- newest
     # kept for the check after the download: a catalogue footprint may claim more than the tile has data for
     itst_skipped <- itst[-keep, ]
     it_skipped <- it_obj %>% items_filter(filter_fn = function(x) as.character(x$id) %in% itst_skipped$.item_id)
@@ -581,19 +597,22 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
   # Check of the skipped tiles against the data: if the downloaded tiles of an acquisition leave
   # more than 0.5% of the AOI without valid pixels (a footprint can be larger than the tile's
   # data), the skipped tiles of that acquisition are downloaded as well (and mosaicked later).
+  # (first the other tiles; older processings of a tile only if a gap remains after those)
   if (!is.null(it_skipped) && length(it_skipped$features) > 0) {
     acq_of <- function(f) vapply(strsplit(basename(f), "_"), function(z) paste(z[1], z[4], sub("GMT.tif$", "", z[6])), character(1))
-    ok_now <- res$file[res$status %in% c("SUCCESS", "EXISTS")]
+    sk_ids <- vapply(it_skipped$features, function(x) as.character(x$id), character(1))
     sk_files <- vapply(it_skipped$features, s2_item_file, character(1))
-    on_disk <- list.files(area_sentinel2_dir, pattern = "GMT.tif$")   # incl. earlier runs' images
-    need <- vapply(seq_along(sk_files), function(i) {
-      a <- acq_of(sk_files[i])
-      if (!a %in% acq_of(ok_now)) return(FALSE)          # acquisition not downloaded now
-      have <- on_disk[acq_of(on_disk) == a]
-      s2_valid_fraction(have, area_sentinel2_dir, aoi) < 0.995
-    }, logical(1))
-    if (any(need)) {
-      message(sum(need), " skipped tile(s) downloaded after all: the other tiles left part of the AOI without data")
+    sk_newest <- itst_skipped$.newest[match(sk_ids, itst_skipped$.item_id)]
+    for (stage in c(TRUE, FALSE)) {
+      ok_now <- res$file[res$status %in% c("SUCCESS", "EXISTS")]
+      on_disk <- list.files(area_sentinel2_dir, pattern = "GMT.tif$")   # incl. earlier runs' images
+      cand <- which(sk_newest %in% stage & !sk_files %in% res$file & acq_of(sk_files) %in% acq_of(ok_now))
+      gap_acq <- unique(Filter(function(a) s2_valid_fraction(on_disk[acq_of(on_disk) == a], area_sentinel2_dir, aoi) < 0.995,
+                               unique(acq_of(sk_files[cand]))))
+      need <- cand[acq_of(sk_files[cand]) %in% gap_acq]
+      if (!length(need)) next
+      message(length(need), " skipped ", if (stage) "tile(s)" else "older processing(s)",
+              " downloaded after all: the other tiles left part of the AOI without data")
       it_need <- it_skipped
       it_need$features <- it_skipped$features[need]
       res2 <- process_features_in_parallel_s2(it_need, area_sentinel2_dir, aoi, workers, epsg = epsg,
@@ -602,7 +621,7 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
                                               http_retry_delay = http_retry_delay)
       res <- bind_rows(res, res2)
       it_obj$features <- c(it_obj$features, it_need$features)
-      itst <- bind_rows(itst, itst_skipped %>% filter(.item_id %in% vapply(it_need$features, function(x) as.character(x$id), character(1))))
+      itst <- bind_rows(itst, itst_skipped %>% filter(.item_id %in% sk_ids[need]))
     }
   }
 
