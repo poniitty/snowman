@@ -698,72 +698,65 @@ process_feature_s2 <- function(ft, area_sentinel2_dir, aoi, exte, reso,
   tmp_file <- paste0(output_file, ".part")
   # --------------------------------------------------------------------------
 
-  all_urls <- make_vsicurl_url_s2(rstac::assets_url(ft))
   band_key <- c("B01", "B02", "B03", "B04", "B05", "B06",
                 "B07", "B08", "B8A", "B09", "B11", "B12", "SCL")
+  # band files in band_key order (taken by asset name; rstac::assets_url() returns unnamed URLs)
+  hrefs <- vapply(band_key, function(b) { h <- ft$assets[[b]]$href; if (is.null(h)) NA_character_ else h }, character(1))
+  if (anyNA(hrefs)) return(out("BROKEN", 0, paste("bands missing in the catalogue:", paste(band_key[is.na(hrefs)], collapse = ", "))))
+  all_urls <- ifelse(grepl("^https?://", hrefs), make_vsicurl_url_s2(hrefs), hrefs)   # (local paths: tests)
+  vrt <- paste0(tmp_file, ".vrt")
+  # target grid: the AOI's UTM grid at 10 m
+  t_srs <- if (!is.na(sf::st_crs(aoi)$epsg)) paste0("EPSG:", sf::st_crs(aoi)$epsg) else sf::st_crs(aoi)$wkt
+  cut0 <- terra::as.polygons(terra::ext(exte), crs = sf::st_crs(aoi)$wkt)
   err <- ""
   prev_bad <- NULL; same_bad <- 0
 
   for (iii in seq_len(max_retries)) {
-    # Open every band separately. A band that fails to open while all the others open is
-    # probably a damaged file on the server (rare on the Planetary Computer); when the same
-    # band(s) fail in 3 attempts in a row, the scene is given up as BROKEN instead of being
-    # retried for minutes. Throttling makes all or varying bands fail, which is retried.
-    r_list <- lapply(all_urls, function(u) try(terra::rast(u), silent = TRUE))
-    bad <- which(vapply(r_list, inherits, logical(1), "try-error"))
-    if (length(bad)) {
-      err <- paste0("cannot open ", paste(sub(".*/", "", all_urls[bad]), collapse = ", "), ": ",
-                    trimws(as.character(r_list[[bad[1]]])))
-      same_bad <- if (identical(bad, prev_bad)) same_bad + 1 else 1
-      prev_bad <- bad
-      if (length(bad) < length(all_urls) && same_bad >= 3) return(out("BROKEN", iii, err))
-      if (iii < max_retries) Sys.sleep(min(300, 5 * 2^(iii - 1)) * stats::runif(1, 0.75, 1.25))
-      next
-    }
-    prev_bad <- NULL; same_bad <- 0
+    # The 13 bands (10, 20 and 60 m) are combined into one virtual raster (VRT, at 10 m) and GDAL's
+    # warp reads the AOI window from it straight onto the 10 m UTM grid of the AOI (nearest
+    # neighbour) and writes the image. This replaced reading the window of each band with terra and
+    # reprojecting it with terra::project(), which used most of the time per scene and slowed down
+    # sharply with parallel workers (test on Roihu: 8 s -> 59 s per scene with 1 -> 8 workers, while
+    # GDAL's warp took 12 -> 21 s for open, read, warp and write together).
     e <- try({
-      # bands come at 10, 20 and 60 m: each is cropped and projected separately below
-
-      # Grid alignment: project all bands to the 10 m UTM template.
-      # This uniformly resamples 20 m bands (B05-B07, B8A, B11, B12, SCL) and
-      # 60 m bands (B01, B09) to 10 m using nearest-neighbour, matching B02-B04/B08.
-      template <- terra::rast(extent = terra::ext(exte), resolution = reso, crs = sf::st_crs(aoi)$wkt)
-      # Each band is cut with the template's extent plus 2 of its own pixels, snapped outward. (Cutting
-      # with the AOI let crop() snap to the nearest pixel edge, which could drop the template's
-      # outermost rows or columns; those pixels stayed empty.)
-      cut0 <- terra::as.polygons(terra::ext(template), crs = terra::crs(template))
+      unlink(c(vrt, tmp_file))
+      sf::gdal_utils("buildvrt", source = all_urls, destination = vrt, quiet = TRUE,
+                     options = c("-separate", "-resolution", "highest", "-srcnodata", "0", "-vrtnodata", "0"))
+      x <- readLines(vrt)
+      # a band file that could not be opened is left out of the VRT (with a warning)
+      present <- vapply(hrefs, function(h) any(grepl(basename(h), x, fixed = TRUE)), logical(1))
+      bad <- which(!present)
+      if (length(bad)) {
+        same_bad <- if (identical(bad, prev_bad)) same_bad + 1 else 1
+        prev_bad <- bad
+        stop("cannot open ", paste(band_key[bad], collapse = ", "))
+      }
+      prev_bad <- NULL; same_bad <- 0
+      # band names (GDAL band descriptions, which terra reads as layer names)
+      bi <- grep("<VRTRasterBand", x)
+      for (k in rev(seq_along(bi))) x <- append(x, paste0("    <Description>", band_key[k], "</Description>"), after = bi[k])
+      writeLines(x, vrt)
       # a tile whose data do not reach the AOI: nothing to download (not an error, not retried)
-      ce1 <- terra::ext(terra::project(cut0, terra::crs(r_list[[1]])))
-      if (is.null(terra::intersect(terra::ext(r_list[[1]]), ce1))) stop("NO_OVERLAP")
-      r_final  <- terra::rast(lapply(r_list, function(r) {
-        cut_ext <- terra::ext(terra::project(cut0, terra::crs(r))) + 2 * max(terra::res(r))
-        r_cropped <- terra::crop(r, cut_ext, snap = "out")
-        terra::project(r_cropped, template, method = "near")
-      }))
-
-      # Standardise band names to clean identifiers (B01, B02, ... B12, B8A, SCL)
-      clean_names <- sapply(names(r_final), function(n) {
-        hit <- band_key[sapply(band_key, function(k) grepl(k, n, ignore.case = FALSE))]
-        if (length(hit) == 1) hit else n
-      })
-      names(r_final) <- clean_names
-      if (!all(band_key %in% names(r_final))) stop("bands missing: ", paste(setdiff(band_key, names(r_final)), collapse = ", "))
-
-      # Order: reflectance bands then SCL (the QA-equivalent layer last)
-      r_final <- r_final[[band_key]]
-      terra::writeRaster(r_final, tmp_file, filetype = "GTiff", datatype = "INT2U",
-                         overwrite = TRUE, NAflag = 0)
-
+      rv <- terra::rast(vrt)
+      if (is.null(terra::intersect(terra::ext(rv), terra::ext(terra::project(cut0, terra::crs(rv)))))) stop("NO_OVERLAP")
+      sf::gdal_utils("warp", vrt, tmp_file, quiet = TRUE,
+                     options = c("-t_srs", t_srs, "-te", exte[1], exte[3], exte[2], exte[4],
+                                 "-tr", reso, reso, "-r", "near", "-ot", "UInt16", "-dstnodata", "0",
+                                 "-of", "GTiff", "-co", "COMPRESS=LZW", "-co", "TILED=YES", "-overwrite"))
       chk <- terra::rast(tmp_file)
       if (terra::nlyr(chk) != length(band_key)) stop("written image has missing bands")
-      invisible(terra::global(chk[[1]], "notNA"))
+      if (!identical(names(chk), band_key)) stop("unexpected band names in the written image")
+      invisible(terra::global(chk[[4]], "notNA"))
       if (!file.rename(tmp_file, output_file)) stop("could not rename ", tmp_file)
     }, silent = TRUE)
-
+    unlink(vrt)
     if (!inherits(e, "try-error")) return(out("SUCCESS", iii))
     err <- trimws(as.character(e))
-    if (grepl("NO_OVERLAP", err)) { unlink(tmp_file); return(out("NO_OVERLAP", iii, "the tile does not reach the AOI")) }
     unlink(tmp_file)
+    if (grepl("NO_OVERLAP", err)) return(out("NO_OVERLAP", iii, "the tile does not reach the AOI"))
+    # the same band(s) failing to open in 3 attempts in a row while the others open: probably a
+    # damaged file on the server; given up as BROKEN instead of being retried for minutes
+    if (length(prev_bad) && length(prev_bad) < length(band_key) && same_bad >= 3) return(out("BROKEN", iii, err))
     if (iii < max_retries) Sys.sleep(min(300, 5 * 2^(iii - 1)) * stats::runif(1, 0.75, 1.25))
   }
   out("ERROR", max_retries, err)

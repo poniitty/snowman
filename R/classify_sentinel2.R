@@ -100,16 +100,30 @@ s2_baseline <- function(image_df, file) {
 #' @param index_mask SCL classes masked in the median indices (default NULL: none, as for Landsat).
 #' @param force Logical, if TRUE all predictors are calculated again; otherwise the DEM/land cover part
 #' and the median part are skipped when their files exist.
-#' @param memmax Maximum memory (GB) terra may use before it works through temporary files (default 4).
-#' terra judges the free memory from the whole node, not from the job's memory limit, so without a
-#' limit it can exceed the memory of a Slurm job or RStudio session and crash R.
+#' @param memmax Maximum memory (GB) terra may use before it works through temporary files (default 4;
+#' 1 GB per parallel worker). terra judges the free memory from the whole node, not from the job's
+#' memory limit, so without a limit it can exceed the memory of a Slurm job or RStudio session and
+#' crash R.
+#' @param workers Number of parallel workers for the per-scene and per-band steps (default 1). Plan
+#' about 2 GB of memory per worker.
 #' @return Invisibly, the predictor directory.
 #' @export
 calc_predictors_s2 <- function(image_df, site_name, base_sentinel2_dir, max_per_month = 15,
                                n_indices = 5, median_mask = c(3, 8, 9, 10), index_mask = NULL,
-                               force = FALSE, memmax = 4) {
+                               force = FALSE, memmax = 4, workers = 1) {
   old_mem <- s2_terra_memory(memmax)
   on.exit(terra::terraOptions(memmax = old_mem), add = TRUE)
+  # parallel map over scenes / bands (own workers; the caller's plan is restored afterwards)
+  pmap <- function(X, FUN, ...) {   # FUN: a package function (no closure over this frame)
+    if (workers <= 1 || length(X) <= 1) return(lapply(X, FUN, ...))
+    future.apply::future_lapply(X, FUN, ..., future.seed = TRUE, future.packages = c("terra", "snowman"),
+                                future.globals = FALSE)
+  }
+  if (workers > 1) {
+    old_plan <- future::plan()
+    future::plan(future::multisession, workers = workers)
+    on.exit(future::plan(old_plan), add = TRUE)
+  }
   image_dir <- file.path(base_sentinel2_dir, site_name, "imagery")
   predictor_dir <- file.path(base_sentinel2_dir, site_name, "predictors")
   if (!dir.exists(predictor_dir)) dir.create(predictor_dir, recursive = TRUE)
@@ -147,50 +161,50 @@ calc_predictors_s2 <- function(image_df, site_name, base_sentinel2_dir, max_per_
         dplyr::filter(month == mo) %>%
         dplyr::arrange(dplyr::desc(clear_proportion)) %>%
         dplyr::slice_head(n = max_per_month)
-      # masked, harmonised reflectance of each image to a temporary file
-      fs <- vapply(seq_len(nrow(mdf)), function(k) {
-        r <- read_sentinel2(mdf$file[k], image_dir, s2_baseline(mdf, mdf$file[k]))
-        if (length(median_mask) > 0) {
-          r <- terra::mask(r[[s2_refl]], r[["SCL"]] %in% median_mask, maskvalues = 1)
-        } else {
-          r <- r[[s2_refl]]
-        }
-        f <- file.path(tmp_dir, sprintf("m%02d_%03d.tif", mo, k))
-        terra::writeRaster(r, f, datatype = "INT2U", overwrite = TRUE)
-        rm(r); gc(verbose = FALSE)
-        f
-      }, character(1))
+      # masked, harmonised reflectance of each image to a temporary file (one pass per image)
+      fs <- file.path(tmp_dir, sprintf("m%02d_%03d.tif", mo, seq_len(nrow(mdf))))
+      bl <- vapply(mdf$file, function(f) as.character(s2_baseline(mdf, f)), character(1))
+      invisible(pmap(seq_len(nrow(mdf)), s2_task_reflectance, files = mdf$file, bl = bl,
+                     image_dir = image_dir, mask = median_mask, out = fs))
       message("median image of month ", mo, " (", length(fs), " scenes)")
-      st <- terra::rast(fs)
-      med <- terra::rast(lapply(s2_refl, function(b) {
-        terra::app(st[[which(names(st) == b)]], "median", na.rm = TRUE)
-      }))
+      bfs <- file.path(tmp_dir, sprintf("b%02d_%s.tif", mo, s2_refl))
+      invisible(pmap(seq_along(s2_refl), s2_task_band_median, fs = fs, bands = s2_refl, out = bfs))
+      med <- terra::rast(bfs)
       names(med) <- s2_refl
-      unlink(fs)
+      med <- med * 1   # into memory / its own file before the inputs are removed
+      unlink(c(fs, bfs))
       med <- s2_fill_na(med)   # all-NA layers -> 0, small gaps from neighbours
       f <- file.path(tmp_dir, paste0("med_", mo, ".tif"))
       terra::writeRaster(round(med), f, datatype = "INT2U", overwrite = TRUE)
       meds[[as.character(mo)]] <- f
     }
 
-    # Gaps that remain are filled from the neighbouring months (linear interpolation over months,
-    # as in the Landsat version), then from the neighbouring pixels
+    # Gaps that remain are filled from the neighbouring months (linear interpolation over the months,
+    # as in the Landsat version; the first and last month are carried to the ends), then from the
+    # neighbouring pixels. Only pixels with a gap are interpolated (vectorised; terra::approximate()
+    # on the whole stack took minutes per band).
     has_na <- vapply(meds, function(f) any(is.na(terra::values(terra::rast(f), mat = FALSE))), logical(1))
-    approx_b <- NULL
     if (any(has_na) && length(months) > 1) {
-      approx_b <- lapply(s2_refl, function(b) {
+      for (b in s2_refl) {
         st <- terra::rast(lapply(meds, function(f) terra::rast(f)[[b]]))
-        suppressWarnings(terra::approximate(st, rule = 2, NArule = 2,
-                                            filename = file.path(tmp_dir, paste0("approx_", b, ".tif")),
-                                            overwrite = TRUE))
-      })
+        M <- terra::values(st, mat = TRUE)
+        M <- s2_interp_months(M, months)
+        for (k in seq_along(months)) {
+          x <- terra::rast(st[[k]]); terra::values(x) <- M[, k]
+          terra::writeRaster(x, file.path(tmp_dir, sprintf("fill_%02d_%s.tif", months[k], b)),
+                             datatype = "INT2U", overwrite = TRUE)
+        }
+        rm(M, st); gc(verbose = FALSE)
+      }
+      message("gaps filled from neighbouring months")
     }
     for (k in seq_along(months)) {
-      mk <- terra::rast(meds[[k]])
-      if (has_na[k] && !is.null(approx_b)) {
-        mk <- terra::rast(lapply(approx_b, function(x) x[[k]]))
-        names(mk) <- s2_refl
+      if (has_na[k] && length(months) > 1) {
+        mk <- terra::rast(file.path(tmp_dir, sprintf("fill_%02d_%s.tif", months[k], s2_refl)))
+      } else {
+        mk <- terra::rast(meds[[k]])
       }
+      names(mk) <- s2_refl
       mk <- s2_fill_na(mk, complete = TRUE)
       terra::writeRaster(round(mk), file.path(predictor_dir, paste0("medians2_", months[k], ".tif")),
                          datatype = "INT2U", overwrite = TRUE)
@@ -210,29 +224,11 @@ calc_predictors_s2 <- function(image_df, site_name, base_sentinel2_dir, max_per_
     dir.create(tmp_dir_i, showWarnings = FALSE)
     on.exit(unlink(tmp_dir_i, recursive = TRUE), add = TRUE)
     message("median indices from ", nrow(idf), " scenes")
-    rr <- lapply(seq_len(nrow(idf)), function(k) {
-      r <- read_sentinel2(idf$file[k], image_dir, s2_baseline(idf, idf$file[k]))
-      scl <- r[["SCL"]]
-      r <- r[[s2_refl]] / 10000
-      if (length(index_mask) > 0) r <- terra::mask(r, scl %in% index_mask, maskvalues = 1)
-      snow <- scl == 11
-      ndvi <- (r[["B08"]] - r[["B04"]]) / (r[["B08"]] + r[["B04"]])
-      ndvi[snow] <- NA
-      ndsi <- (r[["B03"]] - r[["B11"]]) / (r[["B03"]] + r[["B11"]])
-      kbri <- (r[["B11"]] - r[["B08"]]) / (20 * sqrt(r[["B11"]] + r[["B08"]]))
-      kbri[snow] <- NA
-      swm <- (r[["B02"]] + r[["B03"]]) / (r[["B08"]] + r[["B11"]])
-      swm[snow] <- NA
-      bitm <- sqrt((r[["B02"]]^2 + r[["B03"]]^2 + r[["B04"]]^2) / 3)
-      bitm[snow] <- NA
-      x <- c(terra::clamp(ndvi, -1, 1), terra::clamp(ndsi, -1, 1), terra::clamp(kbri, -1, 1), swm, bitm)
-      names(x) <- c("ndvi", "ndsi", "kbri", "swm", "bitm")
-      x[["swm"]][abs(x[["swm"]]) > 10] <- NA
-      f <- file.path(tmp_dir_i, sprintf("i_%03d.tif", k))   # on disk, not in memory
-      terra::writeRaster(x, f, overwrite = TRUE)
-      rm(r, x, ndvi, ndsi, kbri, swm, bitm, scl, snow); gc(verbose = FALSE)
-      terra::rast(f)
-    })
+    ifs <- file.path(tmp_dir_i, sprintf("i_%03d.tif", seq_len(nrow(idf))))   # on disk, not in memory
+    bl <- vapply(idf$file, function(f) as.character(s2_baseline(idf, f)), character(1))
+    invisible(pmap(seq_len(nrow(idf)), s2_task_indices, files = idf$file, bl = bl,
+                   image_dir = image_dir, mask = index_mask, out = ifs))
+    rr <- lapply(ifs, terra::rast)
     pick <- function(nm, fun) {
       st <- terra::rast(lapply(rr, function(x) x[[nm]]))
       s2_fill_na(terra::app(st, fun, na.rm = TRUE), complete = TRUE)
@@ -360,6 +356,96 @@ s2_fill_na <- function(x, complete = FALSE) {
   out <- terra::rast(layers)
   names(out) <- names(x)
   out
+}
+
+# Internal: the 12 reflectance bands of a scene, harmonised (baseline 04.00 offset removed, minimum 1)
+# and with no-data pixels and the SCL classes `mask_classes` set to NA, written to `out`. One pass over
+# the image (terra::app on blocks).
+s2_masked_reflectance <- function(file, image_dir, baseline, mask_classes, out) {
+  s2_worker_limits()
+  r <- terra::rast(file.path(image_dir, file))
+  if (!all(s2_band_key %in% names(r))) names(r) <- s2_band_key
+  off <- if (s2_needs_offset(file, baseline)) 1000 else 0
+  mc <- mask_classes
+  terra::app(r[[s2_band_key]], fun = function(m) {
+    scl <- m[, 13]
+    v <- m[, 1:12, drop = FALSE]
+    if (off > 0) v[] <- pmax(v - off, 1)
+    v[is.na(scl) | scl == 0 | scl %in% mc, ] <- NA
+    v
+  }, filename = out, overwrite = TRUE, wopt = list(datatype = "INT2U", names = s2_refl))
+  invisible(out)
+}
+
+# Internal: NDVI, NDSI, KBRI, SWM and BITM of a scene (reflectance 0-1, harmonised; snow (SCL 11)
+# masked except for NDSI; SCL classes `mask_classes` masked), written to `out`. One pass over the image.
+s2_scene_indices <- function(file, image_dir, baseline, mask_classes, out) {
+  s2_worker_limits()
+  r <- terra::rast(file.path(image_dir, file))
+  if (!all(s2_band_key %in% names(r))) names(r) <- s2_band_key
+  off <- if (s2_needs_offset(file, baseline)) 1000 else 0
+  mc <- mask_classes
+  terra::app(r[[c("B02", "B03", "B04", "B08", "B11", "SCL")]], fun = function(m) {
+    scl <- m[, 6]
+    v <- m[, 1:5, drop = FALSE]
+    if (off > 0) v[] <- pmax(v - off, 1)
+    v <- v / 10000
+    v[is.na(scl) | scl == 0 | scl %in% mc, ] <- NA
+    snow <- scl %in% 11
+    b2 <- v[, 1]; b3 <- v[, 2]; b4 <- v[, 3]; b8 <- v[, 4]; b11 <- v[, 5]
+    clamp1 <- function(x) pmin(pmax(x, -1), 1)
+    ndvi <- clamp1((b8 - b4) / (b8 + b4)); ndvi[snow] <- NA
+    ndsi <- clamp1((b3 - b11) / (b3 + b11))
+    kbri <- clamp1((b11 - b8) / (20 * sqrt(b11 + b8))); kbri[snow] <- NA
+    swm <- (b2 + b3) / (b8 + b11); swm[snow | abs(swm) > 10] <- NA
+    bitm <- sqrt((b2^2 + b3^2 + b4^2) / 3); bitm[snow] <- NA
+    cbind(ndvi, ndsi, kbri, swm, bitm)
+  }, filename = out, overwrite = TRUE, wopt = list(names = c("ndvi", "ndsi", "kbri", "swm", "bitm")))
+  invisible(out)
+}
+
+# Internal: tasks of calc_predictors_s2() for the parallel workers
+s2_task_reflectance <- function(k, files, bl, image_dir, mask, out) {
+  s2_masked_reflectance(files[k], image_dir, bl[k], mask, out[k])
+}
+s2_task_indices <- function(k, files, bl, image_dir, mask, out) {
+  s2_scene_indices(files[k], image_dir, bl[k], mask, out[k])
+}
+s2_task_band_median <- function(i, fs, bands, out) {
+  s2_worker_limits()
+  st <- terra::rast(lapply(fs, function(f) terra::rast(f)[[bands[i]]]))
+  terra::app(st, "median", na.rm = TRUE, filename = out[i], overwrite = TRUE)
+  out[i]
+}
+
+# Internal: memory limits of terra and GDAL in a (worker) process, unless set already
+s2_worker_limits <- function(memmax = 1) {
+  if (terra::terraOptions(print = FALSE)$memmax <= 0) terra::terraOptions(memmax = memmax)
+  if (!nzchar(Sys.getenv("GDAL_CACHEMAX"))) Sys.setenv(GDAL_CACHEMAX = "256")
+  invisible(NULL)
+}
+
+# Internal: linear interpolation of the gaps (NA) in each row of M over the times tt (columns); values
+# before the first / after the last observation are carried to the ends (approx(rule = 2)).
+s2_interp_months <- function(M, tt) {
+  rows <- which(rowSums(is.na(M)) > 0 & rowSums(!is.na(M)) > 0)
+  if (!length(rows)) return(M)
+  X <- M[rows, , drop = FALSE]
+  n <- nrow(X); nt <- ncol(X)
+  prev_i <- matrix(NA_integer_, n, nt); next_i <- matrix(NA_integer_, n, nt)
+  last <- rep(NA_integer_, n)
+  for (j in seq_len(nt)) { ok <- !is.na(X[, j]); last[ok] <- j; prev_i[, j] <- last }
+  last <- rep(NA_integer_, n)
+  for (j in rev(seq_len(nt))) { ok <- !is.na(X[, j]); last[ok] <- j; next_i[, j] <- last }
+  na <- which(is.na(X))
+  r <- (na - 1) %% n + 1
+  cc <- (na - 1) %/% n + 1
+  p <- prev_i[na]; q <- next_i[na]
+  vp <- X[cbind(r, ifelse(is.na(p), 1L, p))]; vq <- X[cbind(r, ifelse(is.na(q), 1L, q))]
+  w <- (tt[cc] - tt[ifelse(is.na(p), 1L, p)]) / (tt[ifelse(is.na(q), 1L, q)] - tt[ifelse(is.na(p), 1L, p)])
+  X[na] <- ifelse(is.na(p), vq, ifelse(is.na(q), vp, vp + (vq - vp) * w))
+  M[rows, ] <- X
+  M
 }
 
 #' Sentinel-2 Feature Stack for the Classifier

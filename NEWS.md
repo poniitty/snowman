@@ -46,6 +46,18 @@
   codes). Scenes with and without the baseline 04.00 offset are not mixed. Merged tile images are
   recorded in `s2s_merged.csv`. Images of earlier runs that were not mosaicked are mosaicked on the
   next run.
+* `extract_sentinel2()` is several times faster: each scene is read with GDAL's warp from a virtual
+  raster of its 13 band files, straight onto the AOI's 10 m grid, instead of reading each band with
+  terra and reprojecting it with `terra::project()`. On Roihu (4 cores), reprojection with terra took
+  8 s per scene alone and 59 s with 8 parallel workers; GDAL's warp took 12 s and 21 s for the whole
+  scene (open, read, warp, write). Pixel values are the same (nearest neighbour; >99.8% identical,
+  the rest differ only where a pixel centre falls on a boundary between source pixels).
+* `calc_predictors_s2()` is faster: each scene is masked and harmonised in one pass (median images
+  and indices), the gaps of the monthly median images are interpolated over the months only where
+  there are gaps (vectorised; `terra::approximate()` took ~2 min per band at 10 m, now seconds), and
+  the per-scene and per-band steps run in parallel with the new `workers` argument. The results are
+  identical; the time axis of the interpolation is now the month number (before: the order of the
+  available months; the same when no month is missing).
 * `extract_sentinel2()` downloads only the tiles of an acquisition that are needed to cover the AOI
   (by the catalogue footprints; MGRS tiles overlap widely near UTM zone edges, so one tile often
   covers a site that touches two). After the download the decision is checked against the data:
