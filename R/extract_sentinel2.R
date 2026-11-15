@@ -471,15 +471,19 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
   # File name as written by process_feature_s2:
   # S2A_MSIL2A_T33VWF_20210101_20210101_100031GMT.tif
   ok_files <- res$file[res$status %in% c("SUCCESS", "EXISTS")]
+  # catalogue properties that not all items have (e.g. older scenes have no "created")
+  prop <- function(nm) if (nm %in% names(itst)) itst[[nm]] else NULL
+  itst$.date2 <- s2_procdate(prop("created"), prop("s2:generation_time"), prop("s2:product_uri"), itst$datetime)
+  itst$.baseline <- s2_baseline_prop(prop("s2:processing_baseline"), prop("s2:product_uri"), nrow(itst))
   idsALL <- itst %>%
     mutate(date  = gsub("-", "", as_date(ymd_hms(datetime)))) %>%
-    mutate(date2 = gsub("-", "", as_date(ymd_hms(created)))) %>%
+    mutate(date2 = .date2) %>%
     mutate(time  = paste0(gsub(":", "", substr(datetime, 12, 19)), "GMT.tif")) %>%
     mutate(file  = paste0(platform, "_MSIL2A_",
                           paste0("T", `s2:mgrs_tile`), "_",
                           date, "_", date2, "_",
                           time)) %>%
-    mutate(PROCESSING_BASELINE = if ("s2:processing_baseline" %in% names(.)) as.character(`s2:processing_baseline`) else NA_character_) %>%
+    mutate(PROCESSING_BASELINE = .baseline) %>%
     select(file, date, `eo:cloud_cover`, `view:sun_elevation`, PROCESSING_BASELINE) %>%
     rename(DATE_ACQUIRED = date,
            CLOUD_COVER   = `eo:cloud_cover`,
@@ -544,7 +548,8 @@ process_feature_s2 <- function(ft, area_sentinel2_dir, aoi, exte, reso,
                              "Sentinel-2D" = "S2D")[ft$properties$platform])
   tile  <- paste0("T", ft$properties$`s2:mgrs_tile`)              # prepend "T" (e.g. T33VWF)
   date  <- gsub("-", "", substr(ft$properties$datetime, 1, 10))   # acquisition date
-  date2 <- gsub("-", "", substr(ft$properties$created,  1, 10))   # processing date
+  date2 <- s2_procdate(ft$properties$created, ft$properties$`s2:generation_time`,   # processing date
+                       ft$properties$`s2:product_uri`, ft$properties$datetime)
   time  <- paste0(gsub(":", "", substr(ft$properties$datetime, 12, 19)), "GMT.tif")
 
   nm <- paste0(platform_short, "_MSIL2A_", tile, "_", date, "_", date2, "_", time)
@@ -672,4 +677,40 @@ calc_coverages_s2 <- function(image, image_dir) {
   })
 
   return(res_tibble)
+}
+
+# Internal: processing date (yyyymmdd) of Sentinel-2 catalogue items, for the file names. The item's
+# "created" date when it has one; older items lack it: then the product generation time, the date at
+# the end of the product name (S2A_MSIL2A_20170903T105031_N0205_R051_T33WXR_20170903T105029.SAFE) or,
+# last, the acquisition date. Vectorised over items.
+s2_procdate <- function(created, generation_time, product_uri, datetime) {
+  n <- length(datetime)
+  val <- function(x) {
+    if (is.null(x) || length(x) == 0) return(rep(NA_character_, n))
+    x <- as.character(unlist(lapply(x, function(z) if (is.null(z) || length(z) == 0) NA else z[1])))
+    x[!nzchar(x)] <- NA
+    x
+  }
+  ymd8 <- function(x) gsub("-", "", substr(x, 1, 10))
+  out <- ymd8(val(created))
+  gen <- ymd8(val(generation_time))
+  pu <- stringr::str_match(val(product_uri), "_([0-9]{8})T[0-9]{6}(\\.SAFE)?$")[, 2]
+  acq <- ymd8(val(datetime))
+  out[is.na(out)] <- gen[is.na(out)]
+  out[is.na(out)] <- pu[is.na(out)]
+  out[is.na(out)] <- acq[is.na(out)]
+  out
+}
+
+# Internal: processing baseline ("05.09") from the item property, or from the product name (N0509)
+s2_baseline_prop <- function(baseline, product_uri, n) {
+  val <- function(x) {
+    if (is.null(x) || length(x) == 0) return(rep(NA_character_, n))
+    as.character(unlist(lapply(x, function(z) if (is.null(z) || length(z) == 0) NA else z[1])))
+  }
+  b <- val(baseline)
+  m <- stringr::str_match(val(product_uri), "_N([0-9]{2})([0-9]{2})_")
+  from_uri <- ifelse(is.na(m[, 2]), NA_character_, paste0(m[, 2], ".", m[, 3]))
+  b[is.na(b) | !nzchar(b)] <- from_uri[is.na(b) | !nzchar(b)]
+  b
 }

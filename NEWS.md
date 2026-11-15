@@ -33,7 +33,11 @@
   those of training data), `max_per_month` (at most this many scenes per calendar
   month, preferring scenes covering the AOI and low cloud cover) and `min_clear`
   (rejection threshold, previously fixed at 0.1). The processing baseline of each
-  scene is recorded in the scene tables (`PROCESSING_BASELINE`).
+  scene is recorded in the scene tables (`PROCESSING_BASELINE`; from the product name when the
+  catalogue item has no baseline property).
+* `extract_sentinel2()` no longer fails on catalogue items without a `created` date (older scenes,
+  e.g. 2017): the processing date in the file name then comes from the product generation time or
+  the product name.
 
 ## Downloads (`extract_landsat()`, `extract_sentinel2()`)
 
