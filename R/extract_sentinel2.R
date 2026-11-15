@@ -510,7 +510,8 @@ process_features_in_parallel_s2 <- function(it_obj, area_sentinel2_dir, aoi, wor
   grid_origin <- c(0, 0) # Sentinel-2 UTM grid: pixel corners at 10 m multiples
   idx <- which(vapply(it_obj$features, item_epsg, numeric(1)) == epsg)
   if (length(idx) > 0) {
-    tmp_url <- make_vsicurl_url_s2(rstac::assets_url(it_obj$features[[idx[1]]])[["B04"]])
+    # (rstac::assets_url() returns the URLs without asset names, so B04 is taken from the item itself)
+    tmp_url <- make_vsicurl_url_s2(it_obj$features[[idx[1]]]$assets$B04$href)
     r_scene <- try(terra::rast(tmp_url), silent = TRUE)
     if (!inherits(r_scene, "try-error")) {
       grid_origin <- terra::origin(r_scene)
