@@ -609,6 +609,10 @@ process_feature_s2 <- function(ft, area_sentinel2_dir, aoi, exte, reso,
   # terra judges free memory from the whole node, not the job's limit: with many workers each
   # holding whole 10 m scenes in memory, R sessions were killed. Larger rasters go via temporary files.
   terra::terraOptions(memmax = 1)
+  # GDAL's block cache defaults to 5% of the node's memory (tens of GB on an HPC node) in every
+  # worker, and fills up while the scenes are read
+  if (!nzchar(Sys.getenv("GDAL_CACHEMAX"))) Sys.setenv(GDAL_CACHEMAX = "256")
+  terra::setGDALconfig("GDAL_CACHEMAX", Sys.getenv("GDAL_CACHEMAX"))
 
   # Build output file name ---------------------------------------------------
   # Format: S2A_MSIL2A_T33VWF_20210101_20210101_100031GMT.tif
