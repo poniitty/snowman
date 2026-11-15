@@ -46,6 +46,11 @@
   codes). Scenes with and without the baseline 04.00 offset are not mixed. Merged tile images are
   recorded in `s2s_merged.csv`. Images of earlier runs that were not mosaicked are mosaicked on the
   next run.
+* `extract_sentinel2()` downloads only the tiles of an acquisition that are needed to cover the AOI
+  (by the catalogue footprints; MGRS tiles overlap widely near UTM zone edges, so one tile often
+  covers a site that touches two). After the download the decision is checked against the data:
+  if the downloaded tiles leave more than 0.5% of the AOI without valid pixels, the skipped tiles of
+  that acquisition are downloaded too.
 * `extract_sentinel2()`: two passes of one satellite on the same day (high latitudes) are separate
   scenes (the scene key includes the time).
 * `extract_sentinel2()`: footprints are intersected with the AOI itself, not its bounding box in

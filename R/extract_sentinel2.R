@@ -444,20 +444,65 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
 
   itst$area <- as.numeric(st_area(itst)) / (1000 * 1000)
 
+  # Only the tiles needed to cover the AOI: an acquisition's tiles (MGRS tiles overlap, by much more
+  # than 10 km near UTM zone edges) are added largest-first, by their catalogue footprints, as long as
+  # each adds at least 0.1% of the AOI; once 99.9% is covered the rest are not downloaded. Ties go to
+  # tiles in the AOI's UTM zone (no reprojection). Not for `groups` (those tiles are wanted as such).
+  if (is.null(groups)) {
+    # the AOI's area measured like the footprints' (in geographic coordinates), so that a covering
+    # tile gives exactly 100%
+    aoi_km2_all <- as.numeric(st_area(st_transform(aoi, st_crs(itst)))) / (1000 * 1000)
+    ep <- setNames(vapply(it_obj$features, item_epsg, numeric(1)),
+                   vapply(it_obj$features, function(x) as.character(x$id), character(1)))
+    itst$.epsg_ok <- ep[itst$.item_id] %in% epsg
+    acq_id <- paste(itst$platform, substr(itst$datetime, 1, 10), substr(itst$datetime, 12, 19))
+    geo <- st_geometry(itst)
+    suppressMessages(suppressWarnings({
+      sf::sf_use_s2(FALSE)
+      keep <- unlist(lapply(split(seq_len(nrow(itst)), acq_id), function(ix) {
+        if (length(ix) == 1) return(ix)
+        ix <- ix[order(-round(itst$area[ix] / aoi_km2_all, 3), !itst$.epsg_ok[ix])]
+        chosen <- ix[1]
+        cov <- itst$area[ix[1]]
+        for (j in ix[-1]) {
+          if (cov >= 0.999 * aoi_km2_all) break
+          new_cov <- as.numeric(st_area(st_union(geo[c(chosen, j)]))) / (1000 * 1000)
+          if (new_cov - cov > 0.001 * aoi_km2_all) { chosen <- c(chosen, j); cov <- new_cov }
+        }
+        chosen
+      }))
+      sf::sf_use_s2(TRUE)
+    }))
+    n_skip <- nrow(itst) - length(keep)
+    if (n_skip > 0) message(n_skip, " tile(s) not needed: the AOI is covered by the other tiles of the same acquisition")
+    itst$.epsg_ok <- NULL
+    # kept for the check after the download: a catalogue footprint may claim more than the tile has data for
+    itst_skipped <- itst[-keep, ]
+    it_skipped <- it_obj %>% items_filter(filter_fn = function(x) as.character(x$id) %in% itst_skipped$.item_id)
+    itst <- itst[sort(keep), ]
+  } else {
+    itst_skipped <- itst[0, ]
+    it_skipped <- NULL
+  }
+
   # At most max_per_month acquisitions per calendar month (known ones included). The unit is an
   # acquisition (satellite + date + time), with all its tiles (they are mosaicked). Within a month,
   # acquisitions are taken in turn from the different years (so that the medians do not come from a
   # few years only); within a year, those covering most of the AOI and with the lowest catalogue
   # cloud cover first.
   if (!is.null(max_per_month)) {
-    aoi_km2 <- as.numeric(st_area(aoi)) / (1000 * 1000)
+    aoi_km2 <- as.numeric(st_area(st_transform(aoi, st_crs(itst)))) / (1000 * 1000)
     kp <- strsplit(as.character(excl_groups), "_")
     known_acq <- unique(vapply(kp, function(z) paste(z[1], z[3], if (length(z) >= 4) z[4] else ""), character(1)))
     known_dates <- suppressWarnings(ymd(vapply(strsplit(known_acq, " "), `[`, character(1), 2)))
     known_mo <- table(factor(month(known_dates), levels = 1:12))
     acq <- itst %>%
       st_drop_geometry() %>%
-      mutate(.acq = paste(platform, substr(datetime, 1, 10), substr(datetime, 12, 19))) %>%
+      mutate(.acq = paste(platform, substr(datetime, 1, 10), substr(datetime, 12, 19)),
+             .known = paste(s2_short(platform), gsub("-", "", substr(datetime, 1, 10)),
+                            gsub(":", "", substr(datetime, 12, 19)))) %>%
+      # other tiles of acquisitions already downloaded (e.g. training scenes) are not new acquisitions
+      filter(!.known %in% known_acq) %>%
       group_by(.acq) %>%
       summarise(.month = month(ymd_hms(datetime[1])), .year = year(ymd_hms(datetime[1])),
                 .cover = min(1, sum(area) / aoi_km2), .cc = mean(`eo:cloud_cover`, na.rm = TRUE),
@@ -532,6 +577,34 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
                                          max_retries = max_retries, retry_rounds = retry_rounds,
                                          retry_wait = retry_wait, http_retries = http_retries,
                                          http_retry_delay = http_retry_delay)
+
+  # Check of the skipped tiles against the data: if the downloaded tiles of an acquisition leave
+  # more than 0.5% of the AOI without valid pixels (a footprint can be larger than the tile's
+  # data), the skipped tiles of that acquisition are downloaded as well (and mosaicked later).
+  if (!is.null(it_skipped) && length(it_skipped$features) > 0) {
+    acq_of <- function(f) vapply(strsplit(basename(f), "_"), function(z) paste(z[1], z[4], sub("GMT.tif$", "", z[6])), character(1))
+    ok_now <- res$file[res$status %in% c("SUCCESS", "EXISTS")]
+    sk_files <- vapply(it_skipped$features, s2_item_file, character(1))
+    on_disk <- list.files(area_sentinel2_dir, pattern = "GMT.tif$")   # incl. earlier runs' images
+    need <- vapply(seq_along(sk_files), function(i) {
+      a <- acq_of(sk_files[i])
+      if (!a %in% acq_of(ok_now)) return(FALSE)          # acquisition not downloaded now
+      have <- on_disk[acq_of(on_disk) == a]
+      s2_valid_fraction(have, area_sentinel2_dir, aoi) < 0.995
+    }, logical(1))
+    if (any(need)) {
+      message(sum(need), " skipped tile(s) downloaded after all: the other tiles left part of the AOI without data")
+      it_need <- it_skipped
+      it_need$features <- it_skipped$features[need]
+      res2 <- process_features_in_parallel_s2(it_need, area_sentinel2_dir, aoi, workers, epsg = epsg,
+                                              max_retries = max_retries, retry_rounds = retry_rounds,
+                                              retry_wait = retry_wait, http_retries = http_retries,
+                                              http_retry_delay = http_retry_delay)
+      res <- bind_rows(res, res2)
+      it_obj$features <- c(it_obj$features, it_need$features)
+      itst <- bind_rows(itst, itst_skipped %>% filter(.item_id %in% vapply(it_need$features, function(x) as.character(x$id), character(1))))
+    }
+  }
 
   itst$platform <- s2_short(itst$platform)
 
@@ -811,4 +884,14 @@ s2_acquisition_key <- function(files, meta = NULL) {
     z <- p[[i]]
     paste(z[1], z[4], if (length(z) >= 6) sub("GMT.tif$", "", z[6]) else "", off[i], sep = "_")
   }, character(1))
+}
+
+# Internal: proportion of the AOI with valid data (B04) in at least one of the given images
+s2_valid_fraction <- function(files, image_dir, aoi) {
+  if (!length(files)) return(0)
+  terra::terraOptions(memmax = 1)
+  r <- terra::rast(lapply(file.path(image_dir, files), function(f) terra::rast(f)[["B04"]]))
+  v <- if (terra::nlyr(r) > 1) terra::app(!is.na(r), "max") else !is.na(r)
+  m <- terra::rasterize(terra::vect(sf::st_transform(aoi, terra::crs(v))), v)
+  as.numeric(terra::global(terra::mask(v, m), "mean", na.rm = TRUE)[1, 1])
 }
