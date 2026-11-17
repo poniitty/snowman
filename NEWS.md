@@ -1,5 +1,14 @@
 # snowman (development version)
 
+## Calibrated class probabilities
+
+* A classifier model can carry a probability calibration (`model$calibration`: temperature scaling,
+  optionally with class offsets), fitted on the out-of-fold predictions of the site-grouped
+  cross-validation by calibrate_models.R. `s2_predict_probs()` applies it (new `s2_calibrate_probs()`),
+  so `classify_landsat()` and `classify_sentinel2()` write calibrated probabilities. Temperature scaling
+  alone does not change the classification, only the confidence of the probabilities; the class
+  offsets also correct class shares shifted by the per-site balancing of the training data.
+
 ## Faster snow variables
 
 * `calc_snow_variables(method = "fast")` (new default) fits the seasonal snow curve of all pixels of a

@@ -1028,7 +1028,38 @@ s2_predict_probs <- function(model, d) {
     if (!is.matrix(pr)) pr <- matrix(pr, ncol = length(model$classes), byrow = TRUE)
     colnames(pr) <- model$classes
   }
+  if (!is.null(model$calibration)) pr <- s2_calibrate_probs(pr, model$calibration)
   pr
+}
+
+#' Calibrate Class Probabilities
+#'
+#' Applies a probability calibration stored in a classifier model (`model$calibration`, made by the
+#' calibration script of the model fitting): temperature scaling with optional class offsets,
+#' \eqn{p_k \propto \exp((\log p_k) / T + b_k)}. With all offsets 0 it does not change which class is
+#' the most probable (the classification), only how confident the probabilities are. [s2_predict_probs()]
+#' applies it automatically, so [classify_landsat()] and [classify_sentinel2()] give calibrated
+#' probabilities.
+#'
+#' @param p Matrix of class probabilities, columns named by class label.
+#' @param calibration List with `temperature` (T > 0) and optionally `offset` (named by class label).
+#' @return The calibrated probabilities (rows sum to 1).
+#' @export
+s2_calibrate_probs <- function(p, calibration) {
+  if (is.null(calibration)) return(p)
+  tt <- calibration$temperature
+  if (is.null(tt) || !is.finite(tt) || tt <= 0) tt <- 1
+  lp <- log(pmax(p, 1e-6)) / tt
+  if (!is.null(calibration$offset)) {
+    off <- calibration$offset[colnames(p)]
+    off[is.na(off)] <- 0
+    lp <- sweep(lp, 2, off, "+")
+  }
+  lp <- lp - apply(lp, 1, max)
+  q <- exp(lp)
+  q <- q / rowSums(q)
+  colnames(q) <- colnames(p)
+  q
 }
 
 # Internal: OpenMP settings for parallel workers (set before they start; they inherit the
