@@ -1,6 +1,39 @@
 # snowman (development version)
 
+## Models included in the package; only what the model needs is downloaded and calculated
+
+* The latest classifier models can be shipped with the package in `inst/extdata/models/`
+  (`latest_TM05.rds`, `latest_LE07.rds`, `latest_LC08.rds`, `latest_S2.rds`). New
+  `snowman_model_file()` finds them. `classify_landsat(model_dir = NULL)` and
+  `classify_sentinel2(model_file = NULL)` use them by default; a `model_dir` / `model_file` given by
+  the user takes precedence. lightgbm moved from Suggests to Imports (the models are LightGBM models).
+* `extract_sentinel2()` has a new argument `bands`. The default `"model"` downloads only the bands
+  the Sentinel-2 model needs (its predictors' bands plus B02, B03, B04, B08, B11 and SCL, which
+  snowman itself needs); with the reduced model B02, B03, B04, B06, B08, B11, B12 and SCL: about a
+  third less to download and 40% less disk space. `"all"` downloads all 13 layers (e.g. for training
+  data); a vector of bands is completed with the bands snowman and the model need, whatever the
+  choice. Images of one acquisition with different band sets (earlier and new downloads) are
+  mosaicked from their common bands. A warning tells if images downloaded earlier lack bands needed
+  now. New `s2_model_requirements()` lists what a model needs.
+* `calc_predictors_s2()` has new arguments `median_images` and `model_file`. The monthly median
+  images, its slowest step, are calculated only if the model uses them (default `NULL`), or always
+  with `TRUE`; `FALSE` is overridden (with a message) when the model uses them. The median images
+  have the reflectance bands present in the images.
+* `read_sentinel2()`, `s2_feature_stack()` and `classify_sentinel2()` work with images of any band
+  subset; `s2_feature_stack()` reads the median images only if the model uses them.
+  `classify_sentinel2()` skips (with a warning) images that lack bands the model uses.
+* `classify_landsat()` calculates only the predictors the model uses: the median-image differences
+  and median indices only when used (before always), only the band pairs in the model (before all
+  ~190 pairs of every pixel), and the pixel table only of the needed layers. The QA bits are read
+  with vectorised bit operations instead of a per-pixel R function (about 1 s per QA layer and
+  scene), and the cloud bit once for the 5- and 25-pixel proportions. Identical results, 30-45%
+  faster per scene in tests.
+
 ## Landsat classification: features now match the models' training data
+
+* `classify_landsat()` also takes LightGBM models (made with `s2_model()`, e.g. by
+  fit_GBM_model_landsat.R); random forest models (plain `rfsrc` forests) work as before. Both are
+  predicted with `s2_predict_probs()`; the output layers are unchanged.
 
 * `classify_landsat()`: for Landsat 4-7, the median-image differences (`mr_diff_*`) are now
   calculated as in the models' training data. There, the images had no B1 layer, so the

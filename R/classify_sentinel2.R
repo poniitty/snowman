@@ -12,9 +12,13 @@
 # functions, so training and classification use identical features.
 # ==========================================================================
 
-# Layers of the Sentinel-2 images written by extract_sentinel2()
+# Layers of the Sentinel-2 images written by extract_sentinel2() (all bands; with bands = "model" the
+# images have only the bands snowman and the model need, in this order)
 s2_band_key <- c("B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B09", "B11", "B12", "SCL")
 s2_refl <- s2_band_key[1:12]
+# Bands snowman itself needs whatever the model: B04 (template grid, valid-data and fill checks),
+# SCL (cloud and fill checks, masks) and the bands of the median indices (B02, B03, B04, B08, B11)
+s2_core_bands <- c("B02", "B03", "B04", "B08", "B11", "SCL")
 # Bands with focal statistics (Landsat: B2 blue, B5 NIR, B7 SWIR2)
 s2_focal_bands <- c("B02", "B08", "B12")
 # ESA WorldCover classes (fixed factor levels, so that training and prediction agree)
@@ -27,8 +31,8 @@ s2_scl_classes <- list(cloud = c(8, 9), cirrus = 10, cshadow = 3, snow = 11, wat
 
 #' Read a Sentinel-2 image, harmonised to the reflectance scale of processing baselines before 04.00
 #'
-#' Reads an image written by [extract_sentinel2()] and returns its 12 reflectance bands and the SCL
-#' layer. Pixels without data (SCL 0 or missing) are NA. For scenes of processing baseline 04.00 and
+#' Reads an image written by [extract_sentinel2()] and returns its reflectance bands (all 12, or those
+#' downloaded; see the `bands` argument of [extract_sentinel2()]) and the SCL layer. Pixels without data (SCL 0 or missing) are NA. For scenes of processing baseline 04.00 and
 #' later, 1000 is subtracted from the reflectance values (minimum 1), so that all scenes share the
 #' scale of the earlier baselines (reflectance x 10000). The baseline is taken from `baseline` (the
 #' `PROCESSING_BASELINE` column of the scene table) when known, otherwise from the acquisition date
@@ -37,24 +41,121 @@ s2_scl_classes <- list(cloud = c(8, 9), cirrus = 10, cshadow = 3, snow = 11, wat
 #' @param file File name of the image (e.g. `S2A_MSIL2A_T33WXR_20170903_20210512_105031GMT.tif`).
 #' @param image_dir Directory of the image.
 #' @param baseline Processing baseline of the scene (e.g. "05.09" or 5.09), or NA.
-#' @return A SpatRaster with layers B01 ... B12, B8A and SCL.
+#' @return A SpatRaster with the reflectance bands of the image (in the order B01 ... B12, B8A) and SCL.
 #' @export
 read_sentinel2 <- function(file, image_dir, baseline = NA) {
-  r <- terra::rast(file.path(image_dir, file))
-  if (!all(s2_band_key %in% names(r))) {
-    if (terra::nlyr(r) != length(s2_band_key)) stop("Unexpected layers in ", file)
-    names(r) <- s2_band_key
-  }
-  r <- r[[s2_band_key]]
+  r <- s2_named(terra::rast(file.path(image_dir, file)), file)
+  bands <- s2_band_key[s2_band_key %in% names(r)]
+  refl_b <- base::intersect(s2_refl, bands)
   scl <- r[["SCL"]]
-  refl <- r[[s2_refl]]
+  refl <- r[[refl_b]]
   if (s2_needs_offset(file, baseline)) {
     refl <- terra::clamp(refl - 1000, lower = 1, values = TRUE)
   }
   r <- c(refl, scl)
   r <- terra::mask(r, scl, maskvalues = c(NA, 0))
-  names(r) <- s2_band_key
+  names(r) <- c(refl_b, "SCL")
   r
+}
+
+# Internal: layer names of an image (images of early versions without names had all 13 layers)
+s2_named <- function(r, file = "") {
+  if (!"SCL" %in% names(r) || !"B04" %in% names(r)) {
+    if (terra::nlyr(r) != length(s2_band_key)) stop("Unexpected layers in ", file)
+    names(r) <- s2_band_key
+  }
+  r
+}
+
+# Internal: bands of image files (from the file headers only)
+s2_file_bands <- function(files, image_dir) {
+  lapply(files, function(f) {
+    r <- try(terra::rast(file.path(image_dir, f)), silent = TRUE)
+    if (inherits(r, "try-error")) return(character(0))
+    names(s2_named(r, f))
+  })
+}
+
+#' Bands and Predictors a Sentinel-2 Model Needs
+#'
+#' Reads a Sentinel-2 classifier ([s2_model()]) and lists what it needs from the data: the image bands
+#' (those of its predictors, plus the bands snowman always needs: B02, B03, B04, B08, B11 and SCL) and
+#' whether it uses the monthly median images of [calc_predictors_s2()]. [extract_sentinel2()] and
+#' [calc_predictors_s2()] use this so that bands and median images the model needs are always
+#' downloaded and calculated.
+#'
+#' @param model_file Path of the model (`.rds`). NULL (default): the model included in snowman
+#' (`latest_S2.rds`, see [snowman_model_file()]).
+#' @return A list: `file`, `vars` (the predictors), `bands` (the image bands needed, in file order),
+#' `model_bands` (bands of the predictors), `medians` (TRUE if the median images are needed) and
+#' `median_bands` (bands of the median images used), or NULL if there is no model file.
+#' @export
+s2_model_requirements <- function(model_file = NULL) {
+  if (is.null(model_file)) model_file <- snowman_model_file("S2", must_exist = FALSE)
+  if (is.null(model_file) || !nzchar(model_file) || !file.exists(model_file)) return(NULL)
+  mod <- s2_model_check(readRDS(model_file))
+  vars <- mod$vars
+  has_tok <- function(b) any(grepl(paste0("(^|_)", b, "(_|$)"), vars))
+  model_bands <- s2_refl[vapply(s2_refl, has_tok, logical(1))]
+  mr <- vars[grepl("mr_diff_", vars)]
+  median_bands <- unique(unlist(regmatches(mr, gregexpr("(?<=mr_diff_)B[0-9][0-9A]", mr, perl = TRUE))))
+  median_bands <- s2_refl[s2_refl %in% median_bands]
+  list(file = model_file, vars = vars,
+       bands = s2_band_key[s2_band_key %in% c(s2_core_bands, model_bands)],
+       model_bands = model_bands, medians = length(mr) > 0, median_bands = median_bands)
+}
+
+# Internal: the bands to download, from the user's choice and the model (see extract_sentinel2())
+s2_resolve_bands <- function(bands = "model", model_file = NULL) {
+  if (is.null(bands)) bands <- "model"
+  bands <- as.character(bands)
+  if (identical(tolower(bands), "all")) return(s2_band_key)
+  req <- s2_model_requirements(model_file)
+  if (is.null(req)) {
+    if (!is.null(model_file)) stop("Model file not found: ", model_file)
+    if (identical(tolower(bands), "model")) {
+      message("No Sentinel-2 model found to check the bands it needs: all bands are downloaded.")
+      return(s2_band_key)
+    }
+    warning("No Sentinel-2 model found to check the bands it needs; the bands given are downloaded.",
+            call. = FALSE)
+  }
+  user <- if (identical(tolower(bands), "model")) character(0) else toupper(bands)
+  bad <- setdiff(user, s2_band_key)
+  if (length(bad)) stop("Unknown Sentinel-2 band(s): ", paste(bad, collapse = ", "),
+                        ". Use any of ", paste(s2_band_key, collapse = ", "), ", \"model\" or \"all\".")
+  if (length(user)) {
+    core_add <- setdiff(s2_core_bands, user)
+    if (length(core_add)) message("Bands always needed by snowman added: ", paste(core_add, collapse = ", "))
+    if (!is.null(req)) {
+      mod_add <- setdiff(req$model_bands, c(user, s2_core_bands))
+      if (length(mod_add)) message("Bands used by the model (", basename(req$file), ") added: ",
+                                   paste(mod_add, collapse = ", "))
+    }
+  }
+  s2_band_key[s2_band_key %in% c(user, s2_core_bands, if (!is.null(req)) req$bands)]
+}
+
+#' Path of a Classifier Model Included in snowman
+#'
+#' The latest classifier models are included in the package (`inst/extdata/models` in the source).
+#' A model of the same name in `model_dir`, if given and found there, is used instead (e.g. models
+#' downloaded with [download_model()] or trained by the user).
+#'
+#' @param name Model name: "TM05" (Landsat 4-5), "LE07", "LC08" (Landsat 8-9) or "S2".
+#' @param model_dir Optional directory with a `latest_<name>.rds` that is used instead.
+#' @param must_exist If TRUE (default), an error when the model is not found; otherwise "" is returned.
+#' @return The path of the model file.
+#' @export
+snowman_model_file <- function(name, model_dir = NULL, must_exist = TRUE) {
+  fn <- paste0("latest_", name, ".rds")
+  if (!is.null(model_dir) && file.exists(file.path(model_dir, fn))) return(file.path(model_dir, fn))
+  f <- system.file("extdata", "models", fn, package = "snowman")
+  if (!nzchar(f) && must_exist) {
+    stop("Model ", fn, " not found ", if (!is.null(model_dir)) paste0("in ", model_dir, " nor "),
+         "among the models included in snowman.")
+  }
+  f
 }
 
 # Internal: does the scene carry the +1000 offset of processing baseline 04.00?
@@ -80,9 +181,9 @@ s2_baseline <- function(image_df, file) {
 #'   `slope.tif` (degrees x 100, 10 m)
 #'   \item `ESALC.tif` (ESA WorldCover 2021, native 10 m) and `ESAW.tif` (proportion of water in the
 #'   surrounding 3 x 3 pixels, i.e. 30 m, as in the Landsat version)
-#'   \item `medians2_<month>.tif`: monthly median images (12 reflectance bands; SCL classes
-#'   `median_mask` masked) of the up to `max_per_month` clearest scenes of each month, completed over
-#'   months and space as in the Landsat version
+#'   \item `medians2_<month>.tif`: monthly median images (the reflectance bands of the images; SCL
+#'   classes `median_mask` masked) of the up to `max_per_month` clearest scenes of each month, completed
+#'   over months and space as in the Landsat version. Only when needed: see `median_images`.
 #'   \item `medianindices.tif`: median NDVI, NDSI, KBRI, SWM and BITM of the up to `n_indices`
 #'   clearest scenes per month. As in the Landsat version, clouds are not masked (cloud masks often
 #'   take late snow beds for clouds); only snow is masked for NDVI, KBRI, SWM and BITM. The median
@@ -106,11 +207,29 @@ s2_baseline <- function(image_df, file) {
 #' crash R.
 #' @param workers Number of parallel workers for the per-scene and per-band steps (default 1). Plan
 #' about 2 GB of memory per worker.
+#' @param median_images Calculate the monthly median images? NULL (default): only if the model uses
+#' them (the median images are the slowest part of this function and need much disk space; the
+#' current model does not use them). TRUE: always; FALSE: not, unless the model uses them (then they
+#' are calculated anyway, with a message). If no model is found, NULL calculates them.
+#' @param model_file The classifier whose needs are checked (see [s2_model_requirements()]). NULL
+#' (default): the model included in snowman.
 #' @return Invisibly, the predictor directory.
 #' @export
 calc_predictors_s2 <- function(image_df, site_name, base_sentinel2_dir, max_per_month = 15,
                                n_indices = 5, median_mask = c(3, 8, 9, 10), index_mask = NULL,
-                               force = FALSE, memmax = 4, workers = 1) {
+                               force = FALSE, memmax = 4, workers = 1, median_images = NULL,
+                               model_file = NULL) {
+  # median images: by the user's choice, but always if the model uses them
+  req <- s2_model_requirements(model_file)
+  if (is.null(req) && !is.null(model_file)) stop("Model file not found: ", model_file)
+  do_medians <- if (!is.null(req) && req$medians) {
+    if (isFALSE(median_images)) message("The model (", basename(req$file), ") uses the median images: they are calculated.")
+    TRUE
+  } else if (is.null(median_images)) {
+    if (is.null(req)) message("No Sentinel-2 model found to check whether it uses the median images: they are calculated.")
+    is.null(req)
+  } else isTRUE(median_images)
+
   old_mem <- s2_terra_memory(memmax)
   on.exit(terra::terraOptions(memmax = old_mem), add = TRUE)
   # parallel map over scenes / bands (own workers; the caller's plan is restored afterwards)
@@ -149,12 +268,22 @@ calc_predictors_s2 <- function(image_df, site_name, base_sentinel2_dir, max_per_
   months <- sort(unique(med_df$month))
   med_files <- file.path(predictor_dir, paste0("medians2_", months, ".tif"))
 
-  if (force || !all(file.exists(med_files))) {
+  if (!do_medians) {
+    message("Monthly median images skipped (not used by the model; median_images = TRUE calculates them)")
+  } else if (force || !all(file.exists(med_files))) {
     unlink(list.files(predictor_dir, pattern = "^medians2_[0-9]+\\.tif$", full.names = TRUE))
     tmp_dir <- file.path(predictor_dir, "tmp_medians")
     dir.create(tmp_dir, showWarnings = FALSE)
     on.exit(unlink(tmp_dir, recursive = TRUE), add = TRUE)
 
+    # the reflectance bands present in all images of the medians (images downloaded with fewer bands
+    # give median images of those bands only)
+    fb <- s2_file_bands(unique(med_df$file), image_dir)
+    med_bands <- base::intersect(s2_refl, Reduce(base::intersect, fb))
+    if (!is.null(req) && length(setdiff(req$median_bands, med_bands))) {
+      stop("The model uses median images of ", paste(setdiff(req$median_bands, med_bands), collapse = ", "),
+           ", which are missing from (some of) the images. Download the images again with these bands (extract_sentinel2()).")
+    }
     meds <- list()
     for (mo in months) {
       mdf <- med_df %>%
@@ -165,12 +294,12 @@ calc_predictors_s2 <- function(image_df, site_name, base_sentinel2_dir, max_per_
       fs <- file.path(tmp_dir, sprintf("m%02d_%03d.tif", mo, seq_len(nrow(mdf))))
       bl <- vapply(mdf$file, function(f) as.character(s2_baseline(mdf, f)), character(1))
       invisible(pmap(seq_len(nrow(mdf)), s2_task_reflectance, files = mdf$file, bl = bl,
-                     image_dir = image_dir, mask = median_mask, out = fs))
+                     image_dir = image_dir, mask = median_mask, out = fs, bands = med_bands))
       message("median image of month ", mo, " (", length(fs), " scenes)")
-      bfs <- file.path(tmp_dir, sprintf("b%02d_%s.tif", mo, s2_refl))
-      invisible(pmap(seq_along(s2_refl), s2_task_band_median, fs = fs, bands = s2_refl, out = bfs))
+      bfs <- file.path(tmp_dir, sprintf("b%02d_%s.tif", mo, med_bands))
+      invisible(pmap(seq_along(med_bands), s2_task_band_median, fs = fs, bands = med_bands, out = bfs))
       med <- terra::rast(bfs)
-      names(med) <- s2_refl
+      names(med) <- med_bands
       med <- med * 1   # into memory / its own file before the inputs are removed
       unlink(c(fs, bfs))
       med <- s2_fill_na(med)   # all-NA layers -> 0, small gaps from neighbours
@@ -185,7 +314,7 @@ calc_predictors_s2 <- function(image_df, site_name, base_sentinel2_dir, max_per_
     # on the whole stack took minutes per band).
     has_na <- vapply(meds, function(f) any(is.na(terra::values(terra::rast(f), mat = FALSE))), logical(1))
     if (any(has_na) && length(months) > 1) {
-      for (b in s2_refl) {
+      for (b in med_bands) {
         st <- terra::rast(lapply(meds, function(f) terra::rast(f)[[b]]))
         M <- terra::values(st, mat = TRUE)
         M <- s2_interp_months(M, months)
@@ -200,11 +329,11 @@ calc_predictors_s2 <- function(image_df, site_name, base_sentinel2_dir, max_per_
     }
     for (k in seq_along(months)) {
       if (has_na[k] && length(months) > 1) {
-        mk <- terra::rast(file.path(tmp_dir, sprintf("fill_%02d_%s.tif", months[k], s2_refl)))
+        mk <- terra::rast(file.path(tmp_dir, sprintf("fill_%02d_%s.tif", months[k], med_bands)))
       } else {
         mk <- terra::rast(meds[[k]])
       }
-      names(mk) <- s2_refl
+      names(mk) <- med_bands
       mk <- s2_fill_na(mk, complete = TRUE)
       terra::writeRaster(round(mk), file.path(predictor_dir, paste0("medians2_", months[k], ".tif")),
                          datatype = "INT2U", overwrite = TRUE)
@@ -358,22 +487,22 @@ s2_fill_na <- function(x, complete = FALSE) {
   out
 }
 
-# Internal: the 12 reflectance bands of a scene, harmonised (baseline 04.00 offset removed, minimum 1)
-# and with no-data pixels and the SCL classes `mask_classes` set to NA, written to `out`. One pass over
-# the image (terra::app on blocks).
-s2_masked_reflectance <- function(file, image_dir, baseline, mask_classes, out) {
+# Internal: the reflectance bands `bands` of a scene (default all 12), harmonised (baseline 04.00
+# offset removed, minimum 1) and with no-data pixels and the SCL classes `mask_classes` set to NA,
+# written to `out`. One pass over the image (terra::app on blocks).
+s2_masked_reflectance <- function(file, image_dir, baseline, mask_classes, out, bands = s2_refl) {
   s2_worker_limits()
-  r <- terra::rast(file.path(image_dir, file))
-  if (!all(s2_band_key %in% names(r))) names(r) <- s2_band_key
+  r <- s2_named(terra::rast(file.path(image_dir, file)), file)
   off <- if (s2_needs_offset(file, baseline)) 1000 else 0
   mc <- mask_classes
-  terra::app(r[[s2_band_key]], fun = function(m) {
-    scl <- m[, 13]
-    v <- m[, 1:12, drop = FALSE]
+  nb <- length(bands)
+  terra::app(r[[c(bands, "SCL")]], fun = function(m) {
+    scl <- m[, nb + 1]
+    v <- m[, seq_len(nb), drop = FALSE]
     if (off > 0) v[] <- pmax(v - off, 1)
     v[is.na(scl) | scl == 0 | scl %in% mc, ] <- NA
     v
-  }, filename = out, overwrite = TRUE, wopt = list(datatype = "INT2U", names = s2_refl))
+  }, filename = out, overwrite = TRUE, wopt = list(datatype = "INT2U", names = bands))
   invisible(out)
 }
 
@@ -381,8 +510,7 @@ s2_masked_reflectance <- function(file, image_dir, baseline, mask_classes, out) 
 # masked except for NDSI; SCL classes `mask_classes` masked), written to `out`. One pass over the image.
 s2_scene_indices <- function(file, image_dir, baseline, mask_classes, out) {
   s2_worker_limits()
-  r <- terra::rast(file.path(image_dir, file))
-  if (!all(s2_band_key %in% names(r))) names(r) <- s2_band_key
+  r <- s2_named(terra::rast(file.path(image_dir, file)), file)
   off <- if (s2_needs_offset(file, baseline)) 1000 else 0
   mc <- mask_classes
   terra::app(r[[c("B02", "B03", "B04", "B08", "B11", "SCL")]], fun = function(m) {
@@ -405,8 +533,8 @@ s2_scene_indices <- function(file, image_dir, baseline, mask_classes, out) {
 }
 
 # Internal: tasks of calc_predictors_s2() for the parallel workers
-s2_task_reflectance <- function(k, files, bl, image_dir, mask, out) {
-  s2_masked_reflectance(files[k], image_dir, bl[k], mask, out[k])
+s2_task_reflectance <- function(k, files, bl, image_dir, mask, out, bands = s2_refl) {
+  s2_masked_reflectance(files[k], image_dir, bl[k], mask, out[k], bands = bands)
 }
 s2_task_indices <- function(k, files, bl, image_dir, mask, out) {
   s2_scene_indices(files[k], image_dir, bl[k], mask, out[k])
@@ -456,7 +584,8 @@ s2_interp_months <- function(M, tt) {
 #'
 #' Layers (Landsat counterparts in brackets):
 #' \itemize{
-#'   \item B01 ... B12, B8A (harmonised reflectance x 10000) and SCL (QA; not a model predictor)
+#'   \item the reflectance bands of the image (B01 ... B12, B8A; harmonised, x 10000) and SCL (QA; not a
+#'   model predictor)
 #'   \item `B02_`, `B08_`, `B12_` + `tpi`, `min5`, `max5`, `std5`: 5 x 5 pixel statistics (B2, B5, B7)
 #'   \item `mr_diff_<band>`: monthly median image minus the image; `mr_diff_B08_std5`, `mr_diff_B12_std5`
 #'   \item `slope`, `hillshade` (sun position at the acquisition time), `esalc`, `esaw`
@@ -510,19 +639,22 @@ s2_feature_stack <- function(file, image_dir, predictor_dir, baseline = NA, vars
     }
   }
 
-  # Difference to the median image of the same (or nearest) month
-  mo <- lubridate::month(lubridate::ymd(strsplit(basename(file), "_")[[1]][4]))
-  mr_files <- list.files(predictor_dir, pattern = "^medians2_[0-9]+\\.tif$")
-  if (length(mr_files) == 0) stop("No medians2_*.tif files in ", predictor_dir, ". Run calc_predictors_s2() first.")
-  avail <- as.numeric(gsub("medians2_|\\.tif", "", mr_files))
-  mo_use <- avail[which.min(pmin(abs(avail - mo), 12 - abs(avail - mo)))]
-  mr <- pfile(paste0("medians2_", mo_use, ".tif"))
-  names(mr) <- s2_refl
+  # Difference to the median image of the same (or nearest) month (only if used: the median images
+  # are not calculated for models that do not use them)
   if (need("mr_diff")) {
-    md <- mr - r[[s2_refl]]
-    names(md) <- paste0("mr_diff_", s2_refl)
+    mo <- lubridate::month(lubridate::ymd(strsplit(basename(file), "_")[[1]][4]))
+    mr_files <- list.files(predictor_dir, pattern = "^medians2_[0-9]+\\.tif$")
+    if (length(mr_files) == 0) stop("No medians2_*.tif files in ", predictor_dir,
+                                    ". Run calc_predictors_s2() (median_images = TRUE) first.")
+    avail <- as.numeric(gsub("medians2_|\\.tif", "", mr_files))
+    mo_use <- avail[which.min(pmin(abs(avail - mo), 12 - abs(avail - mo)))]
+    mr <- pfile(paste0("medians2_", mo_use, ".tif"))
+    if (!all(names(mr) %in% s2_refl)) names(mr) <- s2_refl     # (files of earlier versions)
+    mb <- base::intersect(names(mr), names(r))
+    md <- mr[[mb]] - r[[mb]]
+    names(md) <- paste0("mr_diff_", mb)
     out <- c(out, md)
-    for (b in c("B08", "B12")) {
+    for (b in base::intersect(c("B08", "B12"), mb)) {
       nm <- paste0("mr_diff_", b, "_std5")
       if (need(nm)) {
         x <- terra::focal(r[[b]], w = 5, fun = "sd") - terra::focal(mr[[b]], w = 5, fun = "sd")
@@ -630,8 +762,9 @@ s2_pair_names <- function(nms) s2_pairs(nms)$name
 #' @param image_df The scene table, output of [extract_sentinel2()].
 #' @param site_name Name of the site.
 #' @param base_sentinel2_dir Base directory of the Sentinel-2 data.
-#' @param model_file Path of the model (`.rds`), e.g. `file.path(model_dir, "latest_S2.rds")`: a model
-#' made with [s2_model()] (random forest or LightGBM), or a plain `randomForestSRC` model.
+#' @param model_file Path of the model (`.rds`): a model made with [s2_model()] (random forest or
+#' LightGBM), or a plain `randomForestSRC` model. NULL (default): the model included in snowman
+#' ([snowman_model_file()]).
 #' @param workers Number of images classified in parallel.
 #' @param force Logical, if TRUE also images classified earlier are classified again.
 #' @param chunk_cells Number of pixels predicted at a time (limits the memory use; default 250000).
@@ -639,8 +772,9 @@ s2_pair_names <- function(nms) s2_pairs(nms)$name
 #' (default 2; see [calc_predictors_s2()]). Plan roughly `workers * (memmax + 2)` GB of memory.
 #' @return The file names of the classified images.
 #' @export
-classify_sentinel2 <- function(image_df, site_name, base_sentinel2_dir, model_file, workers = 1,
+classify_sentinel2 <- function(image_df, site_name, base_sentinel2_dir, model_file = NULL, workers = 1,
                                force = FALSE, chunk_cells = 250000, memmax = 2) {
+  if (is.null(model_file)) model_file <- snowman_model_file("S2")
   image_dir <- file.path(base_sentinel2_dir, site_name, "imagery")
   predictor_dir <- file.path(base_sentinel2_dir, site_name, "predictors")
   class_dir <- file.path(base_sentinel2_dir, site_name, "classifications")
@@ -653,6 +787,17 @@ classify_sentinel2 <- function(image_df, site_name, base_sentinel2_dir, model_fi
     return(NULL)
   }
   mod <- s2_model_check(readRDS(model_file))
+  # images downloaded without bands the model needs (e.g. with an earlier model)
+  need_b <- s2_band_key[vapply(s2_band_key, function(b) any(grepl(paste0("(^|_)", b, "(_|$)"), mod$vars)), logical(1))]
+  fb <- s2_file_bands(image_df$file, image_dir)
+  lack <- vapply(fb, function(b) length(setdiff(need_b, b)) > 0, logical(1))
+  if (any(lack)) {
+    warning(sum(lack), " image(s) lack bands the model uses (",
+            paste(unique(unlist(lapply(fb[lack], function(b) setdiff(need_b, b)))), collapse = ", "),
+            ") and are not classified. Download them again with extract_sentinel2().", call. = FALSE)
+    image_df <- image_df[!lack, , drop = FALSE]
+    if (nrow(image_df) == 0) return(NULL)
+  }
 
   run_one <- function(f, paral) {
     safe_classify_s2(f, image_df = image_df, image_dir = image_dir, predictor_dir = predictor_dir,

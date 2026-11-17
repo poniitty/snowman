@@ -1,6 +1,6 @@
 #' Extracts Sentinel-2 Imagery
 #'
-#' This function extracts Landsat imagery that fulfills the specified arguments.
+#' This function extracts Sentinel-2 imagery that fulfills the specified arguments.
 #' It processes the area of interest (AOI), transforms coordinates, and downloads
 #' the relevant Sentinel-2 L2A scenes from Microsoft Planetary Computer.
 #'
@@ -49,6 +49,21 @@
 #' @param min_clear Images whose clear proportion (no fill, no cloud) is below this are deleted and
 #' recorded as rejected (default 0.1). With 0, only images without any data are rejected
 #' (e.g. to keep cloudy scenes of training data).
+#' @param bands Which bands to download:
+#' \itemize{
+#'   \item `"model"` (default): only the bands the classifier needs (see [s2_model_requirements()]): those
+#'   of its predictors and those snowman always needs (B02, B03, B04, B08, B11, SCL). With the current
+#'   model: B02, B03, B04, B06, B08, B11, B12 and SCL, about a third less data to download and 40\% less
+#'   disk space than all bands. If no model is found, all bands are downloaded.
+#'   \item `"all"`: all 12 reflectance bands and SCL (e.g. to gather training data for a new model).
+#'   \item a character vector of bands, e.g. `c("B02", "B08")`: these, plus the bands snowman always
+#'   needs and the bands the model uses (added whatever the choice, with a message).
+#' }
+#' Images downloaded earlier keep their bands. If they lack bands the model needs, a warning tells
+#' how many (they are then not classified by [classify_sentinel2()]; download them again with
+#' `force = TRUE` or after deleting them).
+#' @param model_file The classifier whose bands are checked (`.rds`). NULL (default): the model
+#' included in snowman ([snowman_model_file()]).
 #' @return A tibble containing the metadata of all usable Sentinel-2 scenes of the site (the content
 #' of `s2s_final.csv`, including the processing baseline of each scene in `PROCESSING_BASELINE`, used
 #' to harmonise the reflectance offset of baseline 04.00 and later), or NULL if there are none. Scenes that could not be downloaded in this run
@@ -74,7 +89,13 @@ extract_sentinel2 <- function(aoi,
                             http_retry_delay = 5,
                             groups = NULL,
                             max_per_month = NULL,
-                            min_clear = 0.1) {
+                            min_clear = 0.1,
+                            bands = "model",
+                            model_file = NULL) {
+
+  # Bands to download: the user's choice, completed with the bands snowman and the model need
+  bands <- s2_resolve_bands(bands, model_file)
+  message("Sentinel-2 bands downloaded: ", paste(bands, collapse = ", "))
 
   # Only given scene groups: search over the period of their dates
   if (!is.null(groups)) {
@@ -189,6 +210,20 @@ extract_sentinel2 <- function(aoi,
     readr::read_csv(final_file, show_col_types = FALSE, col_types = readr::cols(.default = "c"))
   } else NULL
 
+  # Images of earlier runs without bands needed now (e.g. downloaded for an earlier model)
+  if (!is.null(prev_final)) {
+    on_disk0 <- intersect(prev_final$file, list.files(area_sentinel2_dir, pattern = "GMT.tif$"))
+    if (length(on_disk0)) {
+      lack <- vapply(s2_file_bands(on_disk0, area_sentinel2_dir), function(b) length(setdiff(bands, b)) > 0, logical(1))
+      if (any(lack)) {
+        warning(sum(lack), " of ", length(on_disk0), " images downloaded earlier lack some of the bands ",
+                paste(bands, collapse = ", "), ". They are kept as they are; download them again ",
+                "(force = TRUE, or delete them and their rows of s2s_final.csv) if the model needs these bands.",
+                call. = FALSE)
+      }
+    }
+  }
+
   # --- 4. SEARCH & DOWNLOAD ---
   if (data_source == "rstac") {
     dl <- extract_sentinel2_stac(workers = workers, start_date = start_date, end_date = end_date, months = months,
@@ -196,7 +231,8 @@ extract_sentinel2 <- function(aoi,
                                sats = sats, area_sentinel2_dir = area_sentinel2_dir, minclouds = minclouds,
                                groups = groups, max_per_month = max_per_month,
                                max_retries = max_retries, retry_rounds = retry_rounds, retry_wait = retry_wait,
-                               http_retries = http_retries, http_retry_delay = http_retry_delay)
+                               http_retries = http_retries, http_retry_delay = http_retry_delay,
+                               bands = bands)
   }
   gc()
   write_download_log(dl$log, area_sentinel2_dir)
@@ -289,12 +325,15 @@ extract_sentinel2 <- function(aoi,
     for (k in dup_acq) {
       fs <- s2s$file[s2s$.acq == k]
       nvalid <- vapply(fs, function(x) {
-        r <- rast(file.path(area_sentinel2_dir, x))[["B04"]]
+        r <- s2_named(rast(file.path(area_sentinel2_dir, x)), x)[["B04"]]
         as.numeric(terra::global(!is.na(r) & r > 0, "sum", na.rm = TRUE)[1, 1])
       }, numeric(1))
       fs <- fs[order(-nvalid)]
+      # only the bands all of them have (images of earlier runs may have more bands than new ones)
+      cb <- Reduce(intersect, s2_file_bands(fs, area_sentinel2_dir))
+      cb <- s2_band_key[s2_band_key %in% cb]
       rs <- lapply(fs, function(x) {
-        r <- rast(file.path(area_sentinel2_dir, x))
+        r <- s2_named(rast(file.path(area_sentinel2_dir, x)), x)[[cb]]
         terra::mask(r, r[["B04"]], maskvalues = c(NA, 0))   # a pixel without data is empty in all bands
       })
       rs <- terra::mosaic(terra::sprc(rs), fun = "first")
@@ -384,7 +423,7 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
                                    minclouds, area_sentinel2_dir, workers,
                                    groups = NULL, max_per_month = NULL,
                                    max_retries = 5, retry_rounds = 2, retry_wait = 60,
-                                   http_retries = 10, http_retry_delay = 5) {
+                                   http_retries = 10, http_retry_delay = 5, bands = s2_band_key) {
 
   # Search (all pages, retried if the API is busy)
   it_obj <- stac_search_all("sentinel-2-l2a", aoi, start_date, end_date)
@@ -402,13 +441,12 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
   }
 
   # Filter by cloud cover, platform, months, and already-known scenes.
-  # Band selection: 12 reflectance bands + SCL (Scene Classification Layer = QA equivalent).
-  # All bands are resampled to 10 m during download (see process_feature_s2).
+  # Band selection: the bands of `bands` (reflectance bands + SCL, the Scene Classification Layer = QA
+  # equivalent). All bands are resampled to 10 m during download (see process_feature_s2).
   it_obj <- it_obj %>%
     items_filter(filter_fn = function(x) { cc <- x$properties$`eo:cloud_cover`; is.null(cc) || isTRUE(cc < minclouds) }) %>%
     items_filter(filter_fn = function(x) { isTRUE(s2_short(x$properties$platform) %in% sats) }) %>%
-    assets_select(asset_names = c("B01", "B02", "B03", "B04", "B05", "B06",
-                                  "B07", "B08", "B8A", "B09", "B11", "B12", "SCL")) %>%
+    assets_select(asset_names = bands) %>%
     items_filter(filter_fn = function(x) { month(ymd_hms(x$properties$datetime)) %in% months }) %>%
     items_filter(filter_fn = function(x) { !feat_key(x) %in% excl_groups })
   if (!is.null(groups)) {
@@ -592,7 +630,7 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
   res <- process_features_in_parallel_s2(it_obj, area_sentinel2_dir, aoi, workers, epsg = epsg,
                                          max_retries = max_retries, retry_rounds = retry_rounds,
                                          retry_wait = retry_wait, http_retries = http_retries,
-                                         http_retry_delay = http_retry_delay)
+                                         http_retry_delay = http_retry_delay, bands = bands)
 
   # Check of the skipped tiles against the data: if the downloaded tiles of an acquisition leave
   # more than 0.5% of the AOI without valid pixels (a footprint can be larger than the tile's
@@ -618,7 +656,7 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
       res2 <- process_features_in_parallel_s2(it_need, area_sentinel2_dir, aoi, workers, epsg = epsg,
                                               max_retries = max_retries, retry_rounds = retry_rounds,
                                               retry_wait = retry_wait, http_retries = http_retries,
-                                              http_retry_delay = http_retry_delay)
+                                              http_retry_delay = http_retry_delay, bands = bands)
       res <- bind_rows(res, res2)
       it_obj$features <- c(it_obj$features, it_need$features)
       itst <- bind_rows(itst, itst_skipped %>% filter(.item_id %in% sk_ids[need]))
@@ -655,7 +693,7 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
 #' Internal Function: Parallel Feature Processing (Sentinel-2) with Grid Alignment
 process_features_in_parallel_s2 <- function(it_obj, area_sentinel2_dir, aoi, workers, epsg,
                                             max_retries = 5, retry_rounds = 2, retry_wait = 60,
-                                            http_retries = 10, http_retry_delay = 5) {
+                                            http_retries = 10, http_retry_delay = 5, bands = s2_band_key) {
 
   # Build grid template from a feature whose native EPSG matches the target.
   # Use B04 (red, 10 m) as the template band. The extent comes from the AOI
@@ -679,19 +717,21 @@ process_features_in_parallel_s2 <- function(it_obj, area_sentinel2_dir, aoi, wor
   download_rounds(it_obj$features, process_feature_s2,
                   list(area_sentinel2_dir = area_sentinel2_dir, aoi = aoi, exte = exte_vals, reso = reso_val,
                        max_retries = max_retries, http_retries = http_retries,
-                       http_retry_delay = http_retry_delay),
+                       http_retry_delay = http_retry_delay, band_key = bands),
                   retry_rounds = retry_rounds, retry_wait = retry_wait)
 }
 
 #' Internal Function: Single Sentinel-2 Feature Extraction with Retry Logic
 #'
-#' All bands must be read: a band that cannot be opened fails the attempt (earlier
+#' All bands of `band_key` must be read: a band that cannot be opened fails the attempt (earlier
 #' versions replaced it with an empty band). The image is written under a
 #' temporary name and renamed only after it has been read back. Returns a one-row
 #' tibble (file, status = SUCCESS / EXISTS / ERROR / BROKEN, attempts, message).
 #' @noRd
 process_feature_s2 <- function(ft, area_sentinel2_dir, aoi, exte, reso,
-                               max_retries = 5, http_retries = 10, http_retry_delay = 5) {
+                               max_retries = 5, http_retries = 10, http_retry_delay = 5,
+                               band_key = c("B01", "B02", "B03", "B04", "B05", "B06",
+                                            "B07", "B08", "B8A", "B09", "B11", "B12", "SCL")) {
 
   # Redeclare locally so the function is self-contained in workers
   make_vsicurl_url_s2 <- function(base_url) {
@@ -717,8 +757,6 @@ process_feature_s2 <- function(ft, area_sentinel2_dir, aoi, exte, reso,
   tmp_file <- paste0(output_file, ".part")
   # --------------------------------------------------------------------------
 
-  band_key <- c("B01", "B02", "B03", "B04", "B05", "B06",
-                "B07", "B08", "B8A", "B09", "B11", "B12", "SCL")
   # band files in band_key order (taken by asset name; rstac::assets_url() returns unnamed URLs)
   hrefs <- vapply(band_key, function(b) { h <- ft$assets[[b]]$href; if (is.null(h)) NA_character_ else h }, character(1))
   if (anyNA(hrefs)) return(out("BROKEN", 0, paste("bands missing in the catalogue:", paste(band_key[is.na(hrefs)], collapse = ", "))))
@@ -731,7 +769,7 @@ process_feature_s2 <- function(ft, area_sentinel2_dir, aoi, exte, reso,
   prev_bad <- NULL; same_bad <- 0
 
   for (iii in seq_len(max_retries)) {
-    # The 13 bands (10, 20 and 60 m) are combined into one virtual raster (VRT, at 10 m) and GDAL's
+    # The bands (10, 20 and 60 m) are combined into one virtual raster (VRT, at 10 m) and GDAL's
     # warp reads the AOI window from it straight onto the 10 m UTM grid of the AOI (nearest
     # neighbour) and writes the image. This replaced reading the window of each band with terra and
     # reprojecting it with terra::project(), which used most of the time per scene and slowed down
@@ -765,7 +803,7 @@ process_feature_s2 <- function(ft, area_sentinel2_dir, aoi, exte, reso,
       chk <- terra::rast(tmp_file)
       if (terra::nlyr(chk) != length(band_key)) stop("written image has missing bands")
       if (!identical(names(chk), band_key)) stop("unexpected band names in the written image")
-      invisible(terra::global(chk[[4]], "notNA"))
+      invisible(terra::global(chk[["B04"]], "notNA"))
       if (!file.rename(tmp_file, output_file)) stop("could not rename ", tmp_file)
     }, silent = TRUE)
     unlink(vrt)
@@ -795,7 +833,7 @@ calc_coverages_s2 <- function(image, image_dir) {
   fpath <- file.path(image_dir, image)
 
   res_tibble <- tryCatch({
-    rs <- terra::rast(fpath)
+    rs <- s2_named(terra::rast(fpath), image)
 
     # Identify SCL band (analogous to QA_PIXEL in Landsat)
     scl_band_name <- names(rs)[grepl("^SCL$", names(rs), ignore.case = TRUE)]
@@ -902,7 +940,7 @@ s2_acquisition_key <- function(files, meta = NULL) {
 s2_valid_fraction <- function(files, image_dir, aoi) {
   if (!length(files)) return(0)
   terra::terraOptions(memmax = 1)
-  r <- terra::rast(lapply(file.path(image_dir, files), function(f) terra::rast(f)[["B04"]]))
+  r <- terra::rast(lapply(files, function(f) s2_named(terra::rast(file.path(image_dir, f)), f)[["B04"]]))
   v <- if (terra::nlyr(r) > 1) terra::app(!is.na(r), "max") else !is.na(r)
   m <- terra::rasterize(terra::vect(sf::st_transform(aoi, terra::crs(v))), v)
   as.numeric(terra::global(terra::mask(v, m), "mean", na.rm = TRUE)[1, 1])

@@ -8,8 +8,8 @@ classify_landsat(
   image_df,
   site_name,
   base_landsat_dir,
-  model_dir,
-  workers,
+  model_dir = NULL,
+  workers = 1,
   force = FALSE
 )
 }
@@ -20,7 +20,9 @@ classify_landsat(
 
 \item{base_landsat_dir}{A character string representing the base directory for Landsat imagery.}
 
-\item{model_dir}{A character string representing the path to the directory containing the pretrained models.}
+\item{model_dir}{Optional directory with your own \code{latest_TM05.rds}, \code{latest_LE07.rds} and/or
+\code{latest_LC08.rds} (e.g. downloaded with \code{\link[=download_model]{download_model()}} or trained yourself). NULL (default), or a
+model missing from the directory: the models included in snowman (\code{\link[=snowman_model_file]{snowman_model_file()}}).}
 
 \item{workers}{A numeric value representing the number of workers for parallel processing.}
 

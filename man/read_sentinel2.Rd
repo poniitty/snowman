@@ -14,11 +14,11 @@ read_sentinel2(file, image_dir, baseline = NA)
 \item{baseline}{Processing baseline of the scene (e.g. "05.09" or 5.09), or NA.}
 }
 \value{
-A SpatRaster with layers B01 ... B12, B8A and SCL.
+A SpatRaster with the reflectance bands of the image (in the order B01 ... B12, B8A) and SCL.
 }
 \description{
-Reads an image written by \code{\link[=extract_sentinel2]{extract_sentinel2()}} and returns its 12 reflectance bands and the SCL
-layer. Pixels without data (SCL 0 or missing) are NA. For scenes of processing baseline 04.00 and
+Reads an image written by \code{\link[=extract_sentinel2]{extract_sentinel2()}} and returns its reflectance bands (all 12, or those
+downloaded; see the \code{bands} argument of \code{\link[=extract_sentinel2]{extract_sentinel2()}}) and the SCL layer. Pixels without data (SCL 0 or missing) are NA. For scenes of processing baseline 04.00 and
 later, 1000 is subtracted from the reflectance values (minimum 1), so that all scenes share the
 scale of the earlier baselines (reflectance x 10000). The baseline is taken from \code{baseline} (the
 \code{PROCESSING_BASELINE} column of the scene table) when known, otherwise from the acquisition date

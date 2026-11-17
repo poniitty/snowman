@@ -29,7 +29,8 @@ same features. Requires the predictors of \code{\link[=calc_predictors_s2]{calc_
 \details{
 Layers (Landsat counterparts in brackets):
 \itemize{
-\item B01 ... B12, B8A (harmonised reflectance x 10000) and SCL (QA; not a model predictor)
+\item the reflectance bands of the image (B01 ... B12, B8A; harmonised, x 10000) and SCL (QA; not a
+model predictor)
 \item \code{B02_}, \code{B08_}, \code{B12_} + \code{tpi}, \code{min5}, \code{max5}, \code{std5}: 5 x 5 pixel statistics (B2, B5, B7)
 \item \verb{mr_diff_<band>}: monthly median image minus the image; \code{mr_diff_B08_std5}, \code{mr_diff_B12_std5}
 \item \code{slope}, \code{hillshade} (sun position at the acquisition time), \code{esalc}, \code{esaw}

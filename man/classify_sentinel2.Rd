@@ -8,7 +8,7 @@ classify_sentinel2(
   image_df,
   site_name,
   base_sentinel2_dir,
-  model_file,
+  model_file = NULL,
   workers = 1,
   force = FALSE,
   chunk_cells = 250000,
@@ -22,8 +22,9 @@ classify_sentinel2(
 
 \item{base_sentinel2_dir}{Base directory of the Sentinel-2 data.}
 
-\item{model_file}{Path of the model (\code{.rds}), e.g. \code{file.path(model_dir, "latest_S2.rds")}: a model
-made with \code{\link[=s2_model]{s2_model()}} (random forest or LightGBM), or a plain \code{randomForestSRC} model.}
+\item{model_file}{Path of the model (\code{.rds}): a model made with \code{\link[=s2_model]{s2_model()}} (random forest or
+LightGBM), or a plain \code{randomForestSRC} model. NULL (default): the model included in snowman
+(\code{\link[=snowman_model_file]{snowman_model_file()}}).}
 
 \item{workers}{Number of images classified in parallel.}
 

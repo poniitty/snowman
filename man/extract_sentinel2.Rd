@@ -24,7 +24,9 @@ extract_sentinel2(
   http_retry_delay = 5,
   groups = NULL,
   max_per_month = NULL,
-  min_clear = 0.1
+  min_clear = 0.1,
+  bands = "model",
+  model_file = NULL
 )
 }
 \arguments{
@@ -77,6 +79,23 @@ does not add more. Used to limit the data volume, e.g. for the monthly median im
 \item{min_clear}{Images whose clear proportion (no fill, no cloud) is below this are deleted and
 recorded as rejected (default 0.1). With 0, only images without any data are rejected
 (e.g. to keep cloudy scenes of training data).}
+
+\item{bands}{Which bands to download:
+\itemize{
+\item \code{"model"} (default): only the bands the classifier needs (see \code{\link[=s2_model_requirements]{s2_model_requirements()}}): those
+of its predictors and those snowman always needs (B02, B03, B04, B08, B11, SCL). With the current
+model: B02, B03, B04, B06, B08, B11, B12 and SCL, about a third less data to download and 40\\% less
+disk space than all bands. If no model is found, all bands are downloaded.
+\item \code{"all"}: all 12 reflectance bands and SCL (e.g. to gather training data for a new model).
+\item a character vector of bands, e.g. \code{c("B02", "B08")}: these, plus the bands snowman always
+needs and the bands the model uses (added whatever the choice, with a message).
+}
+Images downloaded earlier keep their bands. If they lack bands the model needs, a warning tells
+how many (they are then not classified by \code{\link[=classify_sentinel2]{classify_sentinel2()}}; download them again with
+\code{force = TRUE} or after deleting them).}
+
+\item{model_file}{The classifier whose bands are checked (\code{.rds}). NULL (default): the model
+included in snowman (\code{\link[=snowman_model_file]{snowman_model_file()}}).}
 }
 \value{
 A tibble containing the metadata of all usable Sentinel-2 scenes of the site (the content
@@ -85,7 +104,7 @@ to harmonise the reflectance offset of baseline 04.00 and later), or NULL if the
 are in \code{attr(result, "failed")}.
 }
 \description{
-This function extracts Landsat imagery that fulfills the specified arguments.
+This function extracts Sentinel-2 imagery that fulfills the specified arguments.
 It processes the area of interest (AOI), transforms coordinates, and downloads
 the relevant Sentinel-2 L2A scenes from Microsoft Planetary Computer.
 }

@@ -14,7 +14,9 @@ calc_predictors_s2(
   index_mask = NULL,
   force = FALSE,
   memmax = 4,
-  workers = 1
+  workers = 1,
+  median_images = NULL,
+  model_file = NULL
 )
 }
 \arguments{
@@ -43,6 +45,14 @@ crash R.}
 
 \item{workers}{Number of parallel workers for the per-scene and per-band steps (default 1). Plan
 about 2 GB of memory per worker.}
+
+\item{median_images}{Calculate the monthly median images? NULL (default): only if the model uses
+them (the median images are the slowest part of this function and need much disk space; the
+current model does not use them). TRUE: always; FALSE: not, unless the model uses them (then they
+are calculated anyway, with a message). If no model is found, NULL calculates them.}
+
+\item{model_file}{The classifier whose needs are checked (see \code{\link[=s2_model_requirements]{s2_model_requirements()}}). NULL
+(default): the model included in snowman.}
 }
 \value{
 Invisibly, the predictor directory.
@@ -54,9 +64,9 @@ The Sentinel-2 counterpart of \code{\link[=calc_predictors]{calc_predictors()}}.
 \code{slope.tif} (degrees x 100, 10 m)
 \item \code{ESALC.tif} (ESA WorldCover 2021, native 10 m) and \code{ESAW.tif} (proportion of water in the
 surrounding 3 x 3 pixels, i.e. 30 m, as in the Landsat version)
-\item \verb{medians2_<month>.tif}: monthly median images (12 reflectance bands; SCL classes
-\code{median_mask} masked) of the up to \code{max_per_month} clearest scenes of each month, completed over
-months and space as in the Landsat version
+\item \verb{medians2_<month>.tif}: monthly median images (the reflectance bands of the images; SCL
+classes \code{median_mask} masked) of the up to \code{max_per_month} clearest scenes of each month, completed
+over months and space as in the Landsat version. Only when needed: see \code{median_images}.
 \item \code{medianindices.tif}: median NDVI, NDSI, KBRI, SWM and BITM of the up to \code{n_indices}
 clearest scenes per month. As in the Landsat version, clouds are not masked (cloud masks often
 take late snow beds for clouds); only snow is masked for NDVI, KBRI, SWM and BITM. The median

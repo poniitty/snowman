@@ -14,7 +14,8 @@ process_features_in_parallel_s2(
   retry_rounds = 2,
   retry_wait = 60,
   http_retries = 10,
-  http_retry_delay = 5
+  http_retry_delay = 5,
+  bands = s2_band_key
 )
 }
 \description{
