@@ -41,6 +41,30 @@ stac_search_all <- function(collection, aoi, start_date, end_date, max_retries =
   }, max_retries = max_retries, label = paste("STAC search", collection))
 }
 
+# Internal: sensor of image files from their names ("landsat", "sentinel2" or NA)
+image_sensor <- function(files) {
+  b <- basename(files)
+  ifelse(grepl("^S2[A-D]_MSIL2A_", b), "sentinel2",
+         ifelse(grepl("^L[CETOM]0[1-9]_", b), "landsat", NA_character_))
+}
+
+# Internal: Landsat and Sentinel-2 data of a site must be in separate base directories: they use the
+# same folders and file names (predictors/ALOSDEM.tif, ESALC.tif, medianindices.tif, ...) on different
+# grids, so one would overwrite or be mixed with the other. Stops if the site folder holds images or
+# classifications of the other sensor.
+check_single_sensor <- function(site_dir, sensor) {
+  f <- c(list.files(file.path(site_dir, "imagery"), pattern = "GMT.tif$"),
+         list.files(file.path(site_dir, "classifications"), pattern = "GMT.tif$"))
+  other <- setdiff(unique(stats::na.omit(image_sensor(f))), sensor)
+  if (length(other)) {
+    lab <- c(landsat = "Landsat", sentinel2 = "Sentinel-2")
+    stop(site_dir, " already holds ", lab[other], " data. Landsat and Sentinel-2 must be kept in separate ",
+         "base directories (they use the same predictor and table file names on different grids): give ",
+         "the ", lab[sensor], " functions another base directory.", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
 # Internal: scene group keys from output file names
 # (<sat>_<x>_<path/row or tile>_<date>_...): satellite, first three characters of
 # field 3 for Landsat (WRS path) or the whole field for Sentinel-2 (tile), date.

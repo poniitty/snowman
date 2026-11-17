@@ -9,28 +9,42 @@ calc_snow_variables(
   site_name,
   base_landsat_dir,
   workers = 1,
-  chunk_cells = 20000
+  chunk_cells = 20000,
+  sensor = NULL
 )
 }
 \arguments{
-\item{image_df}{A tibble, the output from the \code{extract_landsat} or \code{search_image_df} functions.}
+\item{image_df}{A tibble, the output from \code{\link[=extract_landsat]{extract_landsat()}}, \code{\link[=extract_sentinel2]{extract_sentinel2()}} or
+\code{\link[=search_image_df]{search_image_df()}}, with the scenes of one sensor (see \code{sensor}).}
 
 \item{site_name}{A character string representing the name of the site.}
 
-\item{base_landsat_dir}{A character string representing the base directory for Landsat imagery.}
+\item{base_landsat_dir}{A character string representing the base directory of the imagery: the
+Landsat base directory, or the Sentinel-2 one (\code{base_sentinel2_dir}) for Sentinel-2.}
 
 \item{workers}{A numeric value representing the number of workers for parallel processing.
 Setting workers > 1 (default) enables parallel computing across multiple nodes.}
 
 \item{chunk_cells}{Approximate number of pixels processed at a time. Lower values
 reduce memory use (memory scales with chunk_cells x number of images).}
+
+\item{sensor}{\code{"landsat"} or \code{"sentinel2"}: the scenes used. NULL (default): taken from the file
+names in \code{image_df}, which must then all be of one sensor.}
 }
 \value{
 A SpatRaster object containing the snow variables.
 }
 \description{
-This function calculates snow variables from classified Landsat imagery. It processes the input image data frame,
-calculates snow proportions, and generates snow melting day (SCD) and trend rasters.
+This function calculates snow variables from classified Landsat or Sentinel-2 imagery. It processes the
+input image data frame, calculates snow proportions, and generates snow melting day (SCD) and trend rasters.
+}
+\details{
+The snow variables come from one sensor: Landsat (\code{\link[=classify_landsat]{classify_landsat()}}, 30 m) or Sentinel-2
+(\code{\link[=classify_sentinel2]{classify_sentinel2()}}, 10 m). The two are not combined. The output has the resolution of the
+classifications. Steps that depend on the pixel size use ground distances: clear pixels next to a
+cloud (within 30 m) are left out, and the land cover is aggregated to the output resolution.
+Sentinel-2 has 9 times as many pixels per area as Landsat and more images, so the calculation
+takes correspondingly longer.
 }
 \examples{
 \dontrun{

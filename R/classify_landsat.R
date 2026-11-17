@@ -138,6 +138,10 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_dir = 
   # 2. No parallel workers are currently active (current_plan_workers <= 1).
   if (workers > 1 && current_plan_workers <= 1) {
     
+    # One OpenMP thread per worker and no OpenMP thread binding (see omp_single_thread_env())
+    old_env <- omp_single_thread_env()
+    on.exit(restore_env(old_env), add = TRUE)
+    
     # Store the original plan state (which is currently sequential/idle)
     # We save this so snowman_cleanup() can restore it later.
     oplan <- future::plan() 
@@ -466,6 +470,7 @@ classifying_function <- function(imageid, image_df, predictor_dir, class_landsat
           mod <- mod8
         }
         mod <- s2_model_load(mod, threads = if (paral) 1 else NULL)
+        if (paral) release_core_binding()
         
         # Predict only pixels where all model predictors are available.
         # Pixels with any missing predictor are left NA in the output instead

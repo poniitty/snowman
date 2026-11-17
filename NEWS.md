@@ -1,5 +1,29 @@
 # snowman (development version)
 
+## Parallel classification on systems with OpenMP thread binding
+
+* `classify_landsat()` and `classify_sentinel2()`: the parallel workers now get one OpenMP thread
+  each and no OpenMP thread binding. Where binding is switched on (`OMP_PROC_BIND` / `OMP_PLACES`, as
+  on CSC Roihu), every worker bound its main thread to the same first core of the job, so all
+  workers shared one core (test with 2 workers: 15.8 s before, 7.0 s now, 10.1 s sequential).
+  Workers that were started earlier (a reused plan, forked processes) release the binding themselves.
+
+## Snow variables from Sentinel-2; one sensor per base directory
+
+* `calc_snow_variables()` works on Sentinel-2 classifications (10 m) as on Landsat ones. New argument
+  `sensor` ("landsat" / "sentinel2"): the snow variables come from one sensor; NULL (default) takes it
+  from the file names and stops if `image_df` has both. Steps tied to the pixel size use ground
+  distances: clear pixels within 30 m of a cloud are left out (3 x 3 pixels for Landsat as before,
+  7 x 7 for Sentinel-2), and the land cover is aggregated only if it is finer than the output.
+  For Landsat, the `esalc` layer is now the 30 m class of ESALC.tif; earlier versions aggregated it
+  a second time (most common class of 90 x 90 m). The snow variables themselves are unchanged.
+* `search_image_df()` recognises Sentinel-2 images and returns `s2s_final.csv`, completed with images
+  missing from it.
+* Landsat and Sentinel-2 data of a site must be in separate base directories (they use the same
+  predictor and table file names on different grids). `extract_landsat()`, `extract_sentinel2()`,
+  `calc_predictors()` and `calc_predictors_s2()` stop with a message if the site folder holds data of
+  the other sensor.
+
 ## Models included in the package; only what the model needs is downloaded and calculated
 
 * The latest classifier models can be shipped with the package in `inst/extdata/models/`

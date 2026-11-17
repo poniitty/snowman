@@ -1,12 +1,15 @@
 #' Extract image info
 #'
-#' This function extracts metadata from previously downloaded Landsat imagery.
+#' This function extracts metadata from previously downloaded Landsat or Sentinel-2 imagery (the
+#' sensor is recognised from the file names). For Sentinel-2 it returns `imagery/s2s_final.csv`,
+#' completed with any images on disk that are missing from it.
 #'
 #' @param site_name A character string representing the name of the site.
-#' @param base_landsat_dir A character string representing the base directory for Landsat imagery.
+#' @param base_landsat_dir A character string representing the base directory of the imagery (Landsat,
+#' or the Sentinel-2 base directory).
 #' @param workers A numeric value representing the number of workers for parallel processing. 
 #' Setting workers > 1 (default) enables parallel computing across multiple nodes.
-#' @return A tibble containing the metadata of the previously downloaded Landsat scenes.
+#' @return A tibble containing the metadata of the previously downloaded scenes.
 #' @examples
 #' \dontrun{
 #' # The full workflow
@@ -64,6 +67,11 @@ search_image_df <- function(site_name, base_landsat_dir, workers = 1){
   area_landsat_dir <- paste0(base_landsat_dir,"/",site_name, "/imagery")
   
   tifs <- list.files(area_landsat_dir, pattern = "GMT.tif$")
+  sens <- unique(stats::na.omit(image_sensor(tifs)))
+  if (length(sens) > 1) {
+    stop(area_landsat_dir, " has both Landsat and Sentinel-2 images; keep them in separate base directories.")
+  }
+  if (identical(sens, "sentinel2")) return(search_image_df_s2(site_name, area_landsat_dir, tifs, workers))
   
   if(file.exists(file.path(area_landsat_dir, "lss_final.csv"))){
     lss <- readr::read_csv(file.path(area_landsat_dir, "lss_final.csv"), show_col_types = FALSE)
@@ -103,4 +111,22 @@ search_image_df <- function(site_name, base_landsat_dir, workers = 1){
   write_csv(lss, paste0(area_landsat_dir, "/lss_final.csv"))
   
   return(lss)
+}
+
+# Internal: the Sentinel-2 scene table: s2s_final.csv, completed with images missing from it
+search_image_df_s2 <- function(site_name, image_dir, tifs, workers = 1) {
+  f <- file.path(image_dir, "s2s_final.csv")
+  s2s <- if (file.exists(f)) readr::read_csv(f, show_col_types = FALSE) else NULL
+  missing <- setdiff(tifs, s2s$file)
+  if (!length(missing)) return(s2s)
+  new <- parse_s2_files(tibble(file = missing), site_name)
+  covs <- if (Sys.info()["sysname"] == "Windows" || workers <= 1) {
+    lapply(new$file, calc_coverages_s2, image_dir = image_dir)
+  } else {
+    mclapply(new$file, calc_coverages_s2, image_dir = image_dir, mc.cores = workers)
+  }
+  new <- full_join(new, bind_rows(covs), by = "file")
+  s2s <- bind_rows(s2s, new) %>% arrange(date)
+  write_csv(s2s, f)
+  s2s
 }

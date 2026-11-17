@@ -9,16 +9,19 @@ search_image_df(site_name, base_landsat_dir, workers = 1)
 \arguments{
 \item{site_name}{A character string representing the name of the site.}
 
-\item{base_landsat_dir}{A character string representing the base directory for Landsat imagery.}
+\item{base_landsat_dir}{A character string representing the base directory of the imagery (Landsat,
+or the Sentinel-2 base directory).}
 
 \item{workers}{A numeric value representing the number of workers for parallel processing.
 Setting workers > 1 (default) enables parallel computing across multiple nodes.}
 }
 \value{
-A tibble containing the metadata of the previously downloaded Landsat scenes.
+A tibble containing the metadata of the previously downloaded scenes.
 }
 \description{
-This function extracts metadata from previously downloaded Landsat imagery.
+This function extracts metadata from previously downloaded Landsat or Sentinel-2 imagery (the
+sensor is recognised from the file names). For Sentinel-2 it returns \code{imagery/s2s_final.csv},
+completed with any images on disk that are missing from it.
 }
 \examples{
 \dontrun{

@@ -245,6 +245,7 @@ calc_predictors_s2 <- function(image_df, site_name, base_sentinel2_dir, max_per_
   }
   image_dir <- file.path(base_sentinel2_dir, site_name, "imagery")
   predictor_dir <- file.path(base_sentinel2_dir, site_name, "predictors")
+  check_single_sensor(file.path(base_sentinel2_dir, site_name), "sentinel2")
   if (!dir.exists(predictor_dir)) dir.create(predictor_dir, recursive = TRUE)
 
   image_df <- image_df %>%
@@ -807,6 +808,8 @@ classify_sentinel2 <- function(image_df, site_name, base_sentinel2_dir, model_fi
   if (workers <= 1 || nrow(image_df) <= 2) {
     lss <- lapply(image_df$file, run_one, paral = FALSE)
   } else {
+    old_env <- omp_single_thread_env()   # before the workers start (they inherit it)
+    on.exit(restore_env(old_env), add = TRUE)
     set_parallel_plan(workers)
     lss <- future.apply::future_lapply(image_df$file, run_one, paral = TRUE,
                                        future.packages = c("dplyr", "sf", "terra", "lubridate",
@@ -835,6 +838,7 @@ classify_s2_image <- function(f, image_df, image_dir, predictor_dir, class_dir, 
     options(rf.cores = 1, mc.cores = 1)
   }
   mod <- s2_model_load(mod, threads = if (paral) 1 else NULL)
+  if (paral) release_core_binding()
   vars <- mod$vars
   st <- s2_feature_stack(f, image_dir, predictor_dir, baseline = s2_baseline(image_df, f), vars = vars)
   if (sum(!is.na(terra::values(st[["B04"]], mat = FALSE))) <= 100) return(NULL)
@@ -949,6 +953,35 @@ s2_predict_probs <- function(model, d) {
     colnames(pr) <- model$classes
   }
   pr
+}
+
+# Internal: OpenMP settings for parallel workers (set before they start; they inherit the
+# environment): one OpenMP thread per worker and no thread binding. On systems where OpenMP thread
+# binding is switched on (OMP_PROC_BIND / OMP_PLACES, e.g. on HPC clusters), every worker process
+# would otherwise bind its main thread to the same first core of the job, so that all workers share
+# one core (LightGBM, randomForestSRC and data.table use OpenMP). Returns the previous values.
+omp_single_thread_env <- function() {
+  nm <- c("OMP_NUM_THREADS", "OMP_PROC_BIND", "OMP_PLACES", "OMP_DISPLAY_AFFINITY")
+  old <- Sys.getenv(nm, unset = NA)
+  Sys.setenv(OMP_NUM_THREADS = "1", OMP_PROC_BIND = "false", OMP_DISPLAY_AFFINITY = "false")
+  Sys.unsetenv("OMP_PLACES")
+  old
+}
+restore_env <- function(old) {
+  for (n in names(old)) {
+    if (is.na(old[[n]])) Sys.unsetenv(n) else do.call(Sys.setenv, stats::setNames(list(old[[n]]), n))
+  }
+  invisible(NULL)
+}
+
+# Internal: in a parallel worker, allow the main thread to run on any core of the job again, in case
+# OpenMP bound it to one core (workers started before omp_single_thread_env(), e.g. a reused plan,
+# or forked from a bound process). Linux only; the kernel limits it to the job's cores.
+release_core_binding <- function() {
+  if (!identical(Sys.info()[["sysname"]], "Linux")) return(invisible(NULL))
+  n <- parallel::detectCores(logical = TRUE)
+  if (!is.na(n)) try(parallel::mcaffinity(seq_len(n)), silent = TRUE)
+  invisible(NULL)
 }
 
 # Internal: parallel plan as in classify_landsat() (multisession in RStudio and on Windows,

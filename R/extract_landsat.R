@@ -142,6 +142,7 @@ extract_landsat <- function(aoi,
 
   # --- 3. DIRECTORY & TERRA SETUP ---
   area_landsat_dir <- file.path(base_landsat_dir, site_name, "imagery")
+  check_single_sensor(file.path(base_landsat_dir, site_name), "landsat")
   if (!dir.exists(area_landsat_dir)) dir.create(area_landsat_dir, recursive = TRUE)
 
   my_temp_dir <- file.path(base_landsat_dir, "temp_terra")

@@ -1,11 +1,22 @@
 #' Calculate Snow Variables
 #'
-#' This function calculates snow variables from classified Landsat imagery. It processes the input image data frame,
-#' calculates snow proportions, and generates snow melting day (SCD) and trend rasters.
+#' This function calculates snow variables from classified Landsat or Sentinel-2 imagery. It processes the
+#' input image data frame, calculates snow proportions, and generates snow melting day (SCD) and trend rasters.
 #'
-#' @param image_df A tibble, the output from the `extract_landsat` or `search_image_df` functions.
+#' The snow variables come from one sensor: Landsat ([classify_landsat()], 30 m) or Sentinel-2
+#' ([classify_sentinel2()], 10 m). The two are not combined. The output has the resolution of the
+#' classifications. Steps that depend on the pixel size use ground distances: clear pixels next to a
+#' cloud (within 30 m) are left out, and the land cover is aggregated to the output resolution.
+#' Sentinel-2 has 9 times as many pixels per area as Landsat and more images, so the calculation
+#' takes correspondingly longer.
+#'
+#' @param image_df A tibble, the output from [extract_landsat()], [extract_sentinel2()] or
+#' [search_image_df()], with the scenes of one sensor (see `sensor`).
 #' @param site_name A character string representing the name of the site.
-#' @param base_landsat_dir A character string representing the base directory for Landsat imagery.
+#' @param base_landsat_dir A character string representing the base directory of the imagery: the
+#' Landsat base directory, or the Sentinel-2 one (`base_sentinel2_dir`) for Sentinel-2.
+#' @param sensor `"landsat"` or `"sentinel2"`: the scenes used. NULL (default): taken from the file
+#' names in `image_df`, which must then all be of one sensor.
 #' @param workers A numeric value representing the number of workers for parallel processing. 
 #' Setting workers > 1 (default) enables parallel computing across multiple nodes.
 #' @param chunk_cells Approximate number of pixels processed at a time. Lower values
@@ -64,7 +75,7 @@
 #' @export
 #' @import dplyr sf terra lubridate stringr parallel tibble mgcv purrr tidyr zoo
 calc_snow_variables <- function(image_df, site_name, base_landsat_dir, workers = 1,
-                                chunk_cells = 20000) {
+                                chunk_cells = 20000, sensor = NULL) {
   # Define directories for classifications and predictors
   class_landsat_dir <- paste0(base_landsat_dir, "/", site_name, "/classifications")
   predictor_dir <- paste0(base_landsat_dir, "/", site_name, "/predictors")
@@ -72,9 +83,25 @@ calc_snow_variables <- function(image_df, site_name, base_landsat_dir, workers =
   # List files in the classifications directory
   class_tifs <- list.files(class_landsat_dir, pattern = "GMT.tif$")
   
+  # One sensor only: the one chosen, or the one of all scenes in image_df
+  sens <- image_sensor(image_df$file)
+  if (is.null(sensor)) {
+    u <- unique(stats::na.omit(sens))
+    if (length(u) > 1) {
+      stop("image_df has both Landsat and Sentinel-2 scenes. Snow variables are calculated from one ",
+           "sensor: choose it with sensor = \"landsat\" or sensor = \"sentinel2\".", call. = FALSE)
+    }
+    sensor <- if (length(u)) u else "landsat"
+  } else {
+    sensor <- match.arg(sensor, c("landsat", "sentinel2"))
+    image_df <- image_df[sens %in% sensor, , drop = FALSE]
+  }
+
   # Filter the image data frame to include only the classified images
   image_df <- image_df %>%
     filter(file %in% class_tifs)
+  message("Snow variables from ", nrow(image_df), " classified ",
+          c(landsat = "Landsat", sentinel2 = "Sentinel-2")[[sensor]], " images")
   
   if (nrow(image_df) == 0) {
     message("No classified images found! Snow variables not calculated.")
@@ -148,7 +175,11 @@ calc_snow_variables <- function(image_df, site_name, base_landsat_dir, workers =
   dir.create(tmp_dir, recursive = TRUE)
   on.exit(unlink(tmp_dir, recursive = TRUE), add = TRUE)
   
-  prob_files <- read_classifications(image_df, class_landsat_dir, tmp_dir)
+  # Clear pixels within 30 m of a cloud are left out: a 3 x 3 window at 30 m (Landsat), 7 x 7 at 10 m
+  # (Sentinel-2)
+  px <- terra::res(rast(paste0(class_landsat_dir, "/", image_df$file[1])))[1]
+  cloud_window <- 2 * max(1, round(30 / px)) + 1
+  prob_files <- read_classifications(image_df, class_landsat_dir, tmp_dir, cloud_window)
   
   st <- rast(prob_files)
   nosnow_st <- st[[seq(1, nlyr(st), by = 2)]]
@@ -224,8 +255,12 @@ calc_snow_variables <- function(image_df, site_name, base_landsat_dir, workers =
   rs <- rast(rs)
   
   # Add ESA Land Cover, DEM and NDVI
+  # ESALC.tif is on the grid of the images (Landsat: already the most common class of 3 x 3 pixels of
+  # 10 m; Sentinel-2: 10 m). Aggregated only if it is finer than the output (earlier versions
+  # aggregated the Landsat layer a second time, to 90 m)
   esalc <- rast(paste0(predictor_dir, "/ESALC.tif")) / 10
-  esalc <- aggregate(esalc, 3, getmode)
+  fact <- round(terra::res(rs)[1] / terra::res(esalc)[1])
+  if (fact > 1) esalc <- aggregate(esalc, fact, getmode)
   rs[["esalc"]] <- project(esalc, rs, method = "near")
   
   dem <- rast(paste0(predictor_dir, "/ALOSDEM.tif"))
@@ -243,14 +278,14 @@ calc_snow_variables <- function(image_df, site_name, base_landsat_dir, workers =
 # Internal Function to Read Classifications.
 # Writes a two-layer file (nosnow, snow probabilities) per image into tmp_dir
 # and returns the file paths in the same order as imagedf$file.
-read_classifications <- function(imagedf, basedir, tmp_dir) {
+read_classifications <- function(imagedf, basedir, tmp_dir, cloud_window = 3) {
   vapply(seq_along(imagedf$file), function(i) {
     x <- imagedf$file[[i]]
     r <- rast(paste0(basedir, "/", x))
     
     cloudm <- r[["class"]]
     cloudm[r[["class"]] > 3] <- NA
-    cloudm <- focal(cloudm, 3, min, na.rm = FALSE, fillvalue = 1, expand = FALSE)
+    cloudm <- focal(cloudm, cloud_window, min, na.rm = FALSE, fillvalue = 1, expand = FALSE)
     snow <- r[["snow"]]
     nosnow <- r[["land"]] + r[["water"]]
     snow <- mask(snow, cloudm)

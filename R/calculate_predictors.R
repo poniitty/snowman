@@ -62,6 +62,7 @@
 #' @export
 #' @import rstac dplyr sf terra lubridate stringr parallel tibble readr
 calc_predictors <- function(image_df, site_name, base_landsat_dir, data_source = "rstac") {
+  check_single_sensor(file.path(base_landsat_dir, site_name), "landsat")
   # Create the predictor directory if it does not exist
   predictor_dir <- paste0(base_landsat_dir, "/", site_name, "/predictors")
   if (!dir.exists(predictor_dir)) {

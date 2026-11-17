@@ -189,6 +189,7 @@ extract_sentinel2 <- function(aoi,
 
   # --- 3. DIRECTORY & TERRA SETUP ---
   area_sentinel2_dir <- file.path(base_sentinel2_dir, site_name, "imagery")
+  check_single_sensor(file.path(base_sentinel2_dir, site_name), "sentinel2")
   if (!dir.exists(area_sentinel2_dir)) dir.create(area_sentinel2_dir, recursive = TRUE)
 
   my_temp_dir <- file.path(base_sentinel2_dir, "temp_terra")
