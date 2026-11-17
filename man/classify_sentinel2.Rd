@@ -26,7 +26,11 @@ classify_sentinel2(
 LightGBM), or a plain \code{randomForestSRC} model. NULL (default): the model included in snowman
 (\code{\link[=snowman_model_file]{snowman_model_file()}}).}
 
-\item{workers}{Number of images classified in parallel.}
+\item{workers}{Number of images classified in parallel. Limited to what the memory of the job allows
+(about \code{memmax + 2.5} GB per worker; the limit is read from the job's cgroup, e.g. a Slurm job or
+an RStudio session on an HPC system). The workers are started for this call and stopped at its end
+(so memory is not carried over from one landscape to the next). If a worker stops (e.g. killed for
+using too much memory), the images not yet classified are classified with half as many workers.}
 
 \item{force}{Logical, if TRUE also images classified earlier are classified again.}
 

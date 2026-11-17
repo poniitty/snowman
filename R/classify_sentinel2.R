@@ -766,7 +766,11 @@ s2_pair_names <- function(nms) s2_pairs(nms)$name
 #' @param model_file Path of the model (`.rds`): a model made with [s2_model()] (random forest or
 #' LightGBM), or a plain `randomForestSRC` model. NULL (default): the model included in snowman
 #' ([snowman_model_file()]).
-#' @param workers Number of images classified in parallel.
+#' @param workers Number of images classified in parallel. Limited to what the memory of the job allows
+#' (about `memmax + 2.5` GB per worker; the limit is read from the job's cgroup, e.g. a Slurm job or
+#' an RStudio session on an HPC system). The workers are started for this call and stopped at its end
+#' (so memory is not carried over from one landscape to the next). If a worker stops (e.g. killed for
+#' using too much memory), the images not yet classified are classified with half as many workers.
 #' @param force Logical, if TRUE also images classified earlier are classified again.
 #' @param chunk_cells Number of pixels predicted at a time (limits the memory use; default 250000).
 #' @param memmax Maximum memory (GB) terra may use per worker before it works through temporary files
@@ -805,19 +809,84 @@ classify_sentinel2 <- function(image_df, site_name, base_sentinel2_dir, model_fi
                      class_dir = class_dir, mod = mod, chunk_cells = chunk_cells, paral = paral,
                      memmax = memmax)
   }
+  unlink(list.files(class_dir, pattern = "\\.part\\.tif$", full.names = TRUE))   # leftovers of crashed runs
+  workers <- min(workers, nrow(image_df), limit_workers(workers, memmax + 2.5))
   if (workers <= 1 || nrow(image_df) <= 2) {
     lss <- lapply(image_df$file, run_one, paral = FALSE)
   } else {
     old_env <- omp_single_thread_env()   # before the workers start (they inherit it)
     on.exit(restore_env(old_env), add = TRUE)
-    set_parallel_plan(workers)
-    lss <- future.apply::future_lapply(image_df$file, run_one, paral = TRUE,
-                                       future.packages = c("dplyr", "sf", "terra", "lubridate",
-                                                           "solartime", "randomForestSRC",
-                                                           if (mod$type == "lightgbm") "lightgbm"),
-                                       future.seed = TRUE, future.scheduling = 2)
+    old_plan <- future::plan()
+    on.exit(future::plan(old_plan), add = TRUE)   # stops this call's workers
+    t0 <- Sys.time()
+    todo <- image_df$file
+    lss <- list()
+    repeat {
+      start_parallel_plan(workers)
+      res <- tryCatch(
+        future.apply::future_lapply(todo, run_one, paral = TRUE,
+                                    future.packages = c("dplyr", "sf", "terra", "lubridate",
+                                                        "solartime", "randomForestSRC",
+                                                        if (mod$type == "lightgbm") "lightgbm"),
+                                    future.seed = TRUE, future.scheduling = 2),
+        error = function(e) e)
+      if (!inherits(res, "error")) { lss <- c(lss, res); break }
+      future::plan(future::sequential)   # stops the remaining workers
+      # images written in this run (atomically: a file is complete) are done
+      cf <- file.path(class_dir, todo)
+      done <- todo[file.exists(cf) & file.mtime(cf) >= t0]
+      lss <- c(lss, lapply(done, function(f) list(file = f, ok = TRUE, msg = NA_character_)))
+      todo <- setdiff(todo, done)
+      message("A parallel worker stopped (", substr(conditionMessage(res), 1, 200), "), probably for lack of ",
+              "memory. ", length(todo), " image(s) left; continuing with ", max(1, workers %/% 2), " worker(s).")
+      if (!length(todo)) break
+      if (workers <= 2) { lss <- c(lss, lapply(todo, run_one, paral = FALSE)); break }
+      workers <- workers %/% 2
+    }
   }
   summarise_classifications(lss)
+}
+
+# Internal: the number of workers that fit in the memory of the job (gb_per_worker each, 2 GB for the
+# main R session). The limit is read from the cgroup of the process (Slurm jobs, containers); without
+# one, workers is returned unchanged.
+limit_workers <- function(workers, gb_per_worker) {
+  mem <- job_memory_gb()
+  if (is.na(mem)) return(workers)
+  max_w <- max(1, floor((mem - 2) / gb_per_worker))
+  if (workers > max_w) {
+    message("Memory of the job (", round(mem), " GB) allows about ", max_w, " workers of ~", gb_per_worker,
+            " GB: using ", max_w, " instead of ", workers, ".")
+    return(max_w)
+  }
+  workers
+}
+
+# Internal: memory limit (GB) of the job from the cgroup hierarchy of the process (cgroup v2
+# memory.max or v1 memory.limit_in_bytes; the smallest limit on the path), or NA
+job_memory_gb <- function() {
+  cg <- tryCatch(readLines("/proc/self/cgroup", warn = FALSE), error = function(e) character(0))
+  rd <- function(f) {
+    if (!file.exists(f)) return(NA_real_)
+    x <- suppressWarnings(as.numeric(readLines(f, n = 1, warn = FALSE)))
+    if (length(x) == 0 || is.na(x) || x <= 0 || x > 2^60) NA_real_ else x
+  }
+  walk <- function(root, path, file) {
+    out <- numeric(0)
+    repeat {
+      out <- c(out, rd(file.path(root, path, file)))
+      if (path %in% c("/", "", ".")) break
+      path <- dirname(path)
+    }
+    out
+  }
+  lim <- numeric(0)
+  v2 <- sub("^0::", "", grep("^0::", cg, value = TRUE))
+  if (length(v2)) lim <- c(lim, walk("/sys/fs/cgroup", v2[1], "memory.max"))
+  v1 <- sub("^[0-9]+:[^:]*memory[^:]*:", "", grep("^[0-9]+:[^:]*memory[^:]*:", cg, value = TRUE))
+  if (length(v1)) lim <- c(lim, walk("/sys/fs/cgroup/memory", v1[1], "memory.limit_in_bytes"))
+  lim <- lim[!is.na(lim)]
+  if (!length(lim)) NA_real_ else min(lim) / 1024^3
 }
 
 # Internal: an error in one image does not stop the run
@@ -867,7 +936,14 @@ classify_s2_image <- function(f, image_df, image_dir, predictor_dir, class_dir, 
   }
   rr <- terra::rast(st[[1]], nlyrs = length(out_names), names = out_names)
   terra::values(rr) <- vals
-  terra::writeRaster(rr, file.path(class_dir, f), datatype = "INT1U", overwrite = TRUE)
+  rm(vals, st)
+  # written under a temporary name and renamed when complete, so that a crash never leaves a partial
+  # classification (which a later run would take as done)
+  tmp <- file.path(class_dir, paste0(f, ".part.tif"))
+  terra::writeRaster(rr, tmp, datatype = "INT1U", overwrite = TRUE)
+  rm(rr)
+  if (!file.rename(tmp, file.path(class_dir, f))) stop("could not rename ", tmp)
+  gc(verbose = FALSE)
   f
 }
 
@@ -981,6 +1057,18 @@ release_core_binding <- function() {
   if (!identical(Sys.info()[["sysname"]], "Linux")) return(invisible(NULL))
   n <- parallel::detectCores(logical = TRUE)
   if (!is.na(n)) try(parallel::mcaffinity(seq_len(n)), silent = TRUE)
+  invisible(NULL)
+}
+
+# Internal: a new plan with `workers` workers (multisession in RStudio and on Windows, multicore
+# elsewhere)
+start_parallel_plan <- function(workers) {
+  is_rstudio_env <- !parallelly::supportsMulticore() && Sys.info()["sysname"] %in% c("Linux", "Darwin")
+  if (Sys.info()["sysname"] == "Windows" || is_rstudio_env) {
+    future::plan(future::multisession, workers = workers)
+  } else {
+    future::plan(future::multicore, workers = workers)
+  }
   invisible(NULL)
 }
 

@@ -8,6 +8,13 @@
   workers shared one core (test with 2 workers: 15.8 s before, 7.0 s now, 10.1 s sequential).
   Workers that were started earlier (a reused plan, forked processes) release the binding themselves.
 
+* `classify_sentinel2()`: the number of workers is limited to what the job's memory allows (about
+  `memmax + 2.5` GB each; read from the job's cgroup, e.g. Slurm or an RStudio session on Roihu).
+  The workers are started for each call and stopped at its end, so memory is not carried over from
+  one landscape to the next. If a worker stops (e.g. killed for too much memory), the images not yet
+  classified are classified with half as many workers instead of the whole call failing.
+  Classifications are written under a temporary name and renamed when complete.
+
 ## Snow variables from Sentinel-2; one sensor per base directory
 
 * `calc_snow_variables()` works on Sentinel-2 classifications (10 m) as on Landsat ones. New argument
