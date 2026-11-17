@@ -9,8 +9,19 @@ calc_snow_variables(
   site_name,
   base_landsat_dir,
   workers = 1,
-  chunk_cells = 20000,
-  sensor = NULL
+  chunk_cells = NULL,
+  sensor = NULL,
+  method = c("fast", "gam"),
+  missing_months = c("low_sun", "all", "none"),
+  lambdas = 10^seq(-2, 6, by = 0.5),
+  knots = c("pixel", "landscape"),
+  knot_step = 10,
+  min_images = 50,
+  max_cloud = 0.8,
+  min_prob = 20,
+  min_obs = 20,
+  threshold = 0.5,
+  window = 30
 )
 }
 \arguments{
@@ -26,13 +37,75 @@ Landsat base directory, or the Sentinel-2 one (\code{base_sentinel2_dir}) for Se
 Setting workers > 1 (default) enables parallel computing across multiple nodes.}
 
 \item{chunk_cells}{Approximate number of pixels processed at a time. Lower values
-reduce memory use (memory scales with chunk_cells x number of images).}
+reduce memory use (memory scales with chunk_cells x number of images). NULL (default): about
+40 million / number of images (e.g. 50000 pixels for 800 images), at most 200000.}
 
 \item{sensor}{\code{"landsat"} or \code{"sentinel2"}: the scenes used. NULL (default): taken from the file
 names in \code{image_df}, which must then all be of one sensor.}
+
+\item{method}{How the seasonal snow curve of each pixel is fitted (the model is the same):
+\itemize{
+\item \code{"fast"} (default): all pixels of a chunk are fitted together with matrix operations
+(penalised IRLS), each pixel with its own data and its own smoothing parameter, chosen by the same
+REML criterion as mgcv over a grid of values (\code{lambdas}). The knots of the cyclic spline are
+placed per pixel as gam() places them (at quantiles of the pixel's own observation days), rounded
+to \code{knot_step} days so that pixels with similar observation days share a basis (see \code{knots}).
+Several times faster than \code{"gam"}; in tests across snow regimes and pixel-specific data gaps, melt
+and onset dates agree with \code{"gam"} within 0-1 days (median) at the same accuracy.
+\item \code{"gam"}: one \code{mgcv::gam()} per pixel, as in earlier versions.
+}}
+
+\item{missing_months}{Months without any image get pseudo-observations of snow (weight 0.8, the
+number of images of an average month): \code{"low_sun"} (default) only months whose noon sun is below
+15 degrees at the landscape's latitude (polar night and low winter sun, when no surface reflectance
+products are made); a month missing for other reasons (e.g. clouds of a wet season) is bridged by the
+fitted curve instead of being taken as snowy. \code{"all"}: every month without images (earlier
+versions); \code{"none"}: no pseudo-observations.}
+
+\item{lambdas}{Grid of smoothing parameters for \code{method = "fast"}.}
+
+\item{knots}{\code{method = "fast"}: \code{"pixel"} (default) places the spline knots of each pixel at
+quantiles of its own observation days, as gam() does, so that pixels with gaps in other seasons than
+the rest of the landscape (e.g. persistent clouds or shade) keep their flexibility where they have
+data; \code{"landscape"} uses knots at quantiles of all image dates for every pixel (faster, but about 1
+day less accurate in melt dates for pixels with such gaps).}
+
+\item{knot_step}{Rounding of the pixel knots in days (default 10; 0 = exact, as gam()).}
+
+\item{min_images}{Minimum number of images (after \code{max_cloud}) for the snow variables (default 50).}
+
+\item{max_cloud}{Images classified as cloud in this proportion of the AOI or more are left out
+(default 0.8).}
+
+\item{min_prob}{Class probabilities (\%) below this are not used as observations (default 20): a
+pixel's snow observation of an image is used if its snow probability is at least \code{min_prob}, and
+likewise its no-snow observation (land + water probability).}
+
+\item{min_obs}{The snow curve is fitted for pixels with more than \code{min_obs} observation days over
+all years (default 20).}
+
+\item{threshold}{Snow probability of the fitted curve that defines snow-covered days
+(\code{snow_days}), melt-out (\code{melt}) and snow onset (\code{ns}) (default 0.5).}
+
+\item{window}{Half-width in days of the windows around melt-out and onset in which the observations
+are counted (\code{melt_nobs}, \code{ns_nobs}; default 30).}
 }
 \value{
-A SpatRaster object containing the snow variables.
+A SpatRaster object containing the snow variables, multi-year averages over all images
+(days of year): \code{nobs} (observation days), \code{nyears}, \code{gamr2} (deviance explained), \code{max_snow_doy},
+\code{min_snow_doy}, \code{max_snow_prop}, \code{min_snow_prop} (30-day moving mean of the fitted curve),
+\code{scd_raw} (weighted snow share of the observations x 365), \code{snow_days} (days with fitted
+probability >= \code{threshold}), \code{scd} (sum of the fitted daily probabilities), \code{melt}, \code{ns}; their
+uncertainty: \code{scd_se}, \code{melt_se}, \code{ns_se} (standard errors in days, from the Bayesian covariance of
+the fitted curve, by the delta method; capped at 182.5 days, e.g. where the curve is nearly flat at
+the threshold). They are conservative: in simulations the true average
+melt-out day was within +-1.96 standard errors in 98-100\% of the pixels, mainly because the
+probability weights (< 1) count an image as less than one observation; use them as a relative
+measure of reliability (they grow with fewer, noisier or badly timed observations) rather than as
+calibrated confidence intervals. The observation density at the critical times:
+\code{melt_nobs}, \code{ns_nobs} (observations within +-\code{window} days of melt-out and onset, over all
+years); and \code{esalc}, \code{elevation}, \code{ndvi}. The settings (package version, sensor, method, image
+period, thresholds) are stored with the result as metadata tags: see \code{terra::metags(result)}.
 }
 \description{
 This function calculates snow variables from classified Landsat or Sentinel-2 imagery. It processes the

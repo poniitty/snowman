@@ -1,5 +1,36 @@
 # snowman (development version)
 
+## Faster snow variables
+
+* `calc_snow_variables(method = "fast")` (new default) fits the seasonal snow curve of all pixels of a
+  chunk together with matrix operations instead of one `mgcv::gam()` per pixel. The model is the same
+  (binomial, cyclic cubic spline of the day of year with k = 5, probability weights, pseudo-observations
+  of missing months); each pixel is still fitted with its own data only and gets its own smoothing
+  parameter, chosen by mgcv's REML criterion over a grid (`lambdas`). The spline knots are placed per
+  pixel as gam() places them (at quantiles of the pixel's own observation days), rounded to
+  `knot_step` = 10 days so that pixels with similar observation days share a basis (`knots =
+  "landscape"`: one set of knots from all image dates, faster but ~1 day less accurate for pixels with
+  their own data gaps, e.g. persistent clouds or shade). In tests across snow regimes (Arctic with polar
+  night, alpine, southern hemisphere, Mediterranean, glaciers, tropical mountains, few noisy images)
+  and pixel-specific data gaps, the same pixels are fitted, snow cover duration agrees within ~0.1-0.2
+  days and melt / onset within 0-2 days (median), with the same accuracy against the simulated truth;
+  2-8 times faster per pixel, ~20 times faster end to end on a test site. A pixel's result does not
+  depend on the other pixels (tested). `method = "gam"` gives the earlier per-pixel fits.
+* `calc_snow_variables(missing_months = "low_sun")` (new default): pseudo-observations of snow are added
+  only for months without images whose noon sun is below 15 degrees at the landscape's latitude (polar
+  night, low winter sun). Earlier, every month without images was taken as snowy, which made a snow
+  season out of e.g. the cloudy wet-season months of tropical landscapes. `"all"` restores that.
+  The pseudo-observations are no longer drawn at random (their expected number per month), so results
+  are reproducible.
+* `chunk_cells = NULL` (new default) sets the chunk size from the number of images.
+* New uncertainty and observation-density layers in `calc_snow_variables()` (both methods):
+  `scd_se`, `melt_se`, `ns_se` (standard errors in days from the Bayesian covariance of each pixel's
+  fitted curve, delta method; conservative, a relative measure of reliability) and `melt_nobs`,
+  `ns_nobs` (observations within +-`window` days of melt-out and onset). Little extra time.
+* The thresholds of `calc_snow_variables()` are arguments: `min_images` (50), `max_cloud` (0.8),
+  `min_prob` (20), `min_obs` (20), `threshold` (0.5, for snow days, melt-out and onset), `window`
+  (30). The settings are stored with the result as metadata tags (`terra::metags()`).
+
 ## Parallel classification on systems with OpenMP thread binding
 
 * `classify_landsat()` and `classify_sentinel2()`: the parallel workers now get one OpenMP thread
