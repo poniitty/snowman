@@ -17,6 +17,9 @@
 #' deleted, e.g. after classification) and scenes rejected earlier as too cloudy
 #' (`imagery/s2s_rejected.csv`). Only the newly downloaded images are checked and
 #' added to `s2s_final.csv`.
+#' Images of earlier runs that cover only part of the AOI (a tile or WRS row of their acquisition was
+#' not downloaded) are completed on a re-run: the missing parts are downloaded and mosaicked with
+#' them, and their old classifications are deleted so that they are classified again.
 #'
 #' @param aoi An `sf` object or a list containing the area of interest.
 #' @param site_name A character string representing the name of the site.
@@ -26,7 +29,10 @@
 #' @param months A numeric vector representing the months to include (default is all months, so 1:12).
 #' @param sats A character vector of satellites (default all, c("S2A", "S2B", "S2C"); Sentinel-2C replaced
 #' Sentinel-2A in routine operations in 2025).
-#' @param minclouds A numeric value representing the minimum cloud cover percentage (default is 50).
+#' @param minclouds Maximum catalogue cloud cover (%) of a scene (default 50). It is judged per
+#' acquisition (one satellite pass): when one of the tiles of an acquisition passes, all its tiles
+#' needed to cover the AOI are downloaded, so that an AOI on a tile border is not left half empty. The
+#' cloudiness of the AOI itself is then checked from the downloaded image (`min_clear`).
 #' @param base_sentinel2_dir A character string representing the base directory for Sentinel-2 imagery.
 #' @param workers A numeric value representing the number of workers for parallel processing.
 #' Setting workers > 1 (default) enables parallel computing.
@@ -206,6 +212,11 @@ extract_sentinel2 <- function(aoi,
   # table of earlier runs, to which new scenes are added
   known <- known_groups(area_sentinel2_dir, "s2s_final.csv", c("s2s_rejected.csv", "s2s_merged.csv"),
                         sensor = "sentinel2")
+  # acquisitions that need no further tiles (complete, or not on disk any more); partial images on
+  # disk stay open, so their missing tiles are downloaded and mosaicked with them
+  closed_acq <- if (is.null(groups)) {
+    closed_acquisitions(area_sentinel2_dir, "s2s_final.csv", "s2s_rejected.csv", acq_of = s2_acq_of_file)
+  } else character(0)
   final_file <- file.path(area_sentinel2_dir, "s2s_final.csv")
   prev_final <- if (file.exists(final_file)) {
     readr::read_csv(final_file, show_col_types = FALSE, col_types = readr::cols(.default = "c"))
@@ -229,6 +240,7 @@ extract_sentinel2 <- function(aoi,
   if (data_source == "rstac") {
     dl <- extract_sentinel2_stac(workers = workers, start_date = start_date, end_date = end_date, months = months,
                                aoi = aoi, site_name = site_name, epsg = epsg, excl_groups = known,
+                               excl_acq = closed_acq,
                                sats = sats, area_sentinel2_dir = area_sentinel2_dir, minclouds = minclouds,
                                groups = groups, max_per_month = max_per_month,
                                max_retries = max_retries, retry_rounds = retry_rounds, retry_wait = retry_wait,
@@ -275,6 +287,8 @@ extract_sentinel2 <- function(aoi,
     acq_k <- s2_acquisition_key(cand, meta)
     redo <- intersect(on_disk, cand[acq_k %in% acq_k[duplicated(acq_k)]])
     if (length(redo) > 0) {
+      message(length(redo), " earlier image(s) completed with new tiles of the same acquisition")
+      drop_stale_classifications(area_sentinel2_dir, redo)
       new_files <- c(new_files, redo)
       prev_final <- prev_final %>% filter(!file %in% redo)
     }
@@ -418,7 +432,7 @@ s2_short <- function(platform) {
 
 # Internal Function to Extract Sentinel-2 Imagery from STAC.
 # Returns list(meta = metadata of the downloaded scenes, log = outcome per scene).
-extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
+extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name, excl_acq = character(0),
                                    sats = c("S2A", "S2B", "S2C"),
                                    start_date, end_date, months = 1:12,
                                    minclouds, area_sentinel2_dir, workers,
@@ -441,15 +455,30 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
     paste(feat_group(x), gsub(":", "", substr(x$properties$datetime, 12, 19)), sep = "_")
   }
 
+  # acquisition of an item: satellite, date and time (the form of s2_acq_of_file())
+  feat_acq <- function(x) {
+    paste(s2_short(x$properties$platform), gsub("-", "", substr(x$properties$datetime, 1, 10)),
+          gsub(":", "", substr(x$properties$datetime, 12, 19)), sep = "_")
+  }
+
   # Filter by cloud cover, platform, months, and already-known scenes.
+  # Cloud cover is judged per acquisition: all tiles of an acquisition are kept when one of them
+  # passes `minclouds`, so that an AOI straddling tiles is not left half empty (the cloudiness of the
+  # AOI itself is checked after the download). Tiles of acquisitions that are already complete are
+  # not searched again.
   # Band selection: the bands of `bands` (reflectance bands + SCL, the Scene Classification Layer = QA
   # equivalent). All bands are resampled to 10 m during download (see process_feature_s2).
+  if (length(it_obj$features)) {
+    cc_ok <- vapply(it_obj$features, function(x) as.character(x$id), character(1))[
+      cloud_pass_acq(it_obj$features, feat_acq, minclouds)]
+  } else cc_ok <- character(0)
   it_obj <- it_obj %>%
-    items_filter(filter_fn = function(x) { cc <- x$properties$`eo:cloud_cover`; is.null(cc) || isTRUE(cc < minclouds) }) %>%
+    items_filter(filter_fn = function(x) { as.character(x$id) %in% cc_ok }) %>%
     items_filter(filter_fn = function(x) { isTRUE(s2_short(x$properties$platform) %in% sats) }) %>%
     assets_select(asset_names = bands) %>%
     items_filter(filter_fn = function(x) { month(ymd_hms(x$properties$datetime)) %in% months }) %>%
-    items_filter(filter_fn = function(x) { !feat_key(x) %in% excl_groups })
+    items_filter(filter_fn = function(x) { !feat_key(x) %in% excl_groups }) %>%
+    items_filter(filter_fn = function(x) { !feat_acq(x) %in% excl_acq })
   if (!is.null(groups)) {
     it_obj <- it_obj %>% items_filter(filter_fn = function(x) { feat_group(x) %in% groups })
   }
@@ -571,10 +600,13 @@ extract_sentinel2_stac <- function(aoi, epsg, excl_groups, site_name,
       arrange(.rank, .best, .by_group = TRUE) %>%
       filter(row_number() <= max(0, max_per_month - known_mo[as.character(.month[1])])) %>%
       ungroup()
+    # (missing tiles of partial images on disk are kept: those acquisitions are already counted)
     itst <- itst %>%
-      mutate(.acq = paste(platform, substr(datetime, 1, 10), substr(datetime, 12, 19))) %>%
-      filter(.acq %in% acq$.acq) %>%
-      select(-.acq)
+      mutate(.acq = paste(platform, substr(datetime, 1, 10), substr(datetime, 12, 19)),
+             .known = paste(s2_short(platform), gsub("-", "", substr(datetime, 1, 10)),
+                            gsub(":", "", substr(datetime, 12, 19)))) %>%
+      filter(.acq %in% acq$.acq | .known %in% known_acq) %>%
+      select(-.acq, -.known)
     if (nrow(itst) == 0) {
       print("No new Sentinel-2 scenes to download (max_per_month reached)!")
       return(list(meta = NULL, log = NULL))
@@ -919,6 +951,16 @@ s2_item_file <- function(ft) {
   date2 <- s2_procdate(p$created, p$`s2:generation_time`, p$`s2:product_uri`, p$datetime)
   time  <- paste0(gsub(":", "", substr(p$datetime, 12, 19)), "GMT.tif")
   paste0(platform_short, "_MSIL2A_", tile, "_", date, "_", date2, "_", time)
+}
+
+# Internal: acquisition of image files as satellite_date_time (e.g. S2A_20221119_074619), the form
+# that extract_sentinel2_stac() builds from the catalogue items
+s2_acq_of_file <- function(files) {
+  if (!length(files)) return(character(0))
+  vapply(strsplit(basename(files), "_"), function(z) {
+    if (length(z) < 6) return(NA_character_)
+    paste(z[1], z[4], sub("GMT.tif$", "", z[6]), sep = "_")
+  }, character(1))
 }
 
 # Internal: acquisition key of image files: satellite, date, time and whether the scene has the

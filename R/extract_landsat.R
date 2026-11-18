@@ -17,6 +17,9 @@
 #' deleted, e.g. after classification) and scenes rejected earlier as too cloudy
 #' (`imagery/lss_rejected.csv`). Only the newly downloaded images are checked and
 #' added to `lss_final.csv`.
+#' Images of earlier runs that cover only part of the AOI (a tile or WRS row of their acquisition was
+#' not downloaded) are completed on a re-run: the missing parts are downloaded and mosaicked with
+#' them, and their old classifications are deleted so that they are classified again.
 #'
 #' @param aoi An `sf` object or a list containing the area of interest.
 #' @param site_name A character string representing the name of the site.
@@ -25,7 +28,10 @@
 #' @param end_date A character string representing the end date for the imagery.
 #' @param months A numeric vector representing the months to include (default is all months, so 1:12).
 #' @param sats A character string representing the satellite to use (default is Landsat-8 only, so "LC08").
-#' @param minclouds A numeric value representing the minimum cloud cover percentage (default is 50).
+#' @param minclouds Maximum catalogue cloud cover (%) of a scene (default 50). It is judged per
+#' acquisition (one satellite pass): when one of the WRS rows of an acquisition passes, all its WRS rows
+#' needed to cover the AOI are downloaded, so that an AOI on a tile border is not left half empty. The
+#' cloudiness of the AOI itself is then checked from the downloaded image (less than 10% clear: rejected).
 #' @param base_landsat_dir A character string representing the base directory for Landsat imagery.
 #' @param workers A numeric value representing the number of workers for parallel processing.
 #' Setting workers > 1 (default) enables parallel computing.
@@ -158,6 +164,13 @@ extract_landsat <- function(aoi,
   # Scenes that need no download (see the function description), and the scene
   # table of earlier runs, to which new scenes are added
   known <- known_groups(area_landsat_dir, "lss_final.csv", "lss_rejected.csv", sensor = "landsat")
+  # Acquisitions (satellite, WRS path, date) that need no further rows: all known ones except partial
+  # images still on disk, whose missing WRS rows are downloaded and mosaicked with them
+  closed_acq <- closed_acquisitions(area_landsat_dir, "lss_final.csv", "lss_rejected.csv",
+                                    acq_of = function(f) group_from_file(f, "landsat"))
+  disk_files <- list.files(area_landsat_dir, pattern = "GMT.tif$")
+  open_files <- disk_files[!group_from_file(disk_files, "landsat") %in% closed_acq]
+  open_scenes <- landsat_scene_of_file(open_files)   # their own rows are not downloaded again
   final_file <- file.path(area_landsat_dir, "lss_final.csv")
   prev_final <- if (file.exists(final_file)) {
     readr::read_csv(final_file, show_col_types = FALSE, col_types = readr::cols(.default = "c"))
@@ -166,7 +179,8 @@ extract_landsat <- function(aoi,
   # --- 4. SEARCH & DOWNLOAD ---
   if (data_source == "rstac") {
     dl <- extract_landsat_stac(workers = workers, start_date = start_date, end_date = end_date, months = months,
-                               aoi = aoi, site_name = site_name, epsg = epsg, excl_groups = known,
+                               aoi = aoi, site_name = site_name, epsg = epsg, excl_groups = closed_acq,
+                               excl_scenes = open_scenes,
                                sats = sats, area_landsat_dir = area_landsat_dir, minclouds = minclouds,
                                max_retries = max_retries, retry_rounds = retry_rounds, retry_wait = retry_wait,
                                http_retries = http_retries, http_retry_delay = http_retry_delay)
@@ -193,6 +207,17 @@ extract_landsat <- function(aoi,
   # --- 5. NEW IMAGES: on disk but not yet in the final scene table ---
   tifs <- list.files(area_landsat_dir, pattern = "GMT.tif$")
   new_files <- setdiff(tifs, prev_final$file)
+  # Earlier (partial) images of an acquisition with a new WRS row are mosaicked again with it
+  if (!is.null(prev_final) && length(new_files) > 0) {
+    on_disk <- intersect(prev_final$file, tifs)
+    redo <- on_disk[group_from_file(on_disk, "landsat") %in% group_from_file(new_files, "landsat")]
+    if (length(redo) > 0) {
+      message(length(redo), " earlier image(s) completed with new WRS rows of the same acquisition")
+      drop_stale_classifications(area_landsat_dir, redo)
+      new_files <- c(new_files, redo)
+      prev_final <- prev_final %>% filter(!file %in% redo)
+    }
+  }
   if (length(new_files) == 0) {
     if (is.null(prev_final)) {
       print("Zero Landsat scenes found or downloaded!")
@@ -310,7 +335,7 @@ make_vsicurl_url <- function(base_url) {
 
 # Internal Function to Extract Landsat Imagery from STAC.
 # Returns list(meta = metadata of the downloaded scenes, log = outcome per scene).
-extract_landsat_stac <- function(aoi, epsg, excl_groups, site_name,
+extract_landsat_stac <- function(aoi, epsg, excl_groups, site_name, excl_scenes = character(0),
                                  sats = c("LT04", "LT05", "LE07", "LC08", "LC09"),
                                  start_date, end_date, months = 1:12,
                                  minclouds, area_landsat_dir, workers,
@@ -332,12 +357,29 @@ extract_landsat_stac <- function(aoi, epsg, excl_groups, site_name,
           gsub("-", "", substr(x$properties$datetime, 1, 10)), sep = "_")
   }
 
+  # scene (one WRS row of an acquisition): <sat>_<pathrow>_<date>, as landsat_scene_of_file()
+  feat_scene <- function(x) {
+    paste(short[[x$properties$platform]],
+          paste0(sprintf("%03d", as.integer(x$properties$`landsat:wrs_path`)),
+                 sprintf("%03d", as.integer(x$properties$`landsat:wrs_row`))),
+          gsub("-", "", substr(x$properties$datetime, 1, 10)), sep = "_")
+  }
+
+  # Cloud cover is judged per acquisition (satellite, path, date): all WRS rows of an overpass are
+  # kept when one of them passes `minclouds`, so that an AOI on the border of two rows is not left
+  # half empty (the cloudiness of the AOI itself is checked after the download).
+  it_obj <- it_obj %>% items_filter(filter_fn = function(x) { x$properties$platform %in% sats2 })
+  cc_ok <- if (length(it_obj$features)) {
+    vapply(it_obj$features, function(x) as.character(x$id), character(1))[
+      cloud_pass_acq(it_obj$features, feat_group, minclouds)]
+  } else character(0)
   it_obj <- it_obj %>%
-    items_filter(filter_fn = function(x) { x$properties$`eo:cloud_cover` < minclouds }) %>%
+    items_filter(filter_fn = function(x) { as.character(x$id) %in% cc_ok }) %>%
     items_filter(filter_fn = function(x) { x$properties$platform %in% sats2 }) %>%
     assets_select(asset_names = c("coastal", "blue", "green", "red", "nir08", "swir16", "swir22", "lwir", "lwir11", "qa_pixel", "qa_radsat")) %>%
     items_filter(filter_fn = function(x) { month(ymd_hms(x$properties$datetime)) %in% months }) %>%
-    items_filter(filter_fn = function(x) { !feat_group(x) %in% excl_groups })
+    items_filter(filter_fn = function(x) { !feat_group(x) %in% excl_groups }) %>%
+    items_filter(filter_fn = function(x) { !feat_scene(x) %in% excl_scenes })
 
   if (length(it_obj$features) == 0) {
     print("No new Landsat scenes to download!")
@@ -655,4 +697,13 @@ calc_coverages <- function(image, image_dir){
   })
   
   return(res_tibble)
+}
+
+# Internal: scene of Landsat image files (one WRS row of an acquisition): <sat>_<pathrow>_<date>
+landsat_scene_of_file <- function(files) {
+  if (!length(files)) return(character(0))
+  vapply(strsplit(basename(files), "_"), function(z) {
+    if (length(z) < 4) return(NA_character_)
+    paste(z[1], z[3], z[4], sep = "_")
+  }, character(1))
 }

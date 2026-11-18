@@ -145,3 +145,58 @@ report_downloads <- function(res, n_known, image_dir) {
     warning(n_err + n_broken, " scene(s) could not be downloaded (see ", file.path(image_dir, "download_log.csv"),
             "). They are attempted again when the function is run again.", call. = FALSE)
 }
+
+# Internal: catalogue cloud filter at the level of acquisitions. An acquisition (one satellite pass:
+# the S2 tiles or Landsat WRS rows of one overpass) is kept with ALL its tiles when at least one of
+# its tiles has catalogue cloud cover below `minclouds` (or none recorded). Filtering tile by tile
+# kept only the clear tile of an acquisition straddling two tiles, and the image then covered only
+# part of the AOI. The cloudiness of the AOI itself is checked after the download (clear proportion
+# of the mosaic). features: STAC items; acq_key: function(item) -> key. Returns a logical per item.
+cloud_pass_acq <- function(features, acq_key, minclouds) {
+  if (!length(features)) return(logical(0))
+  cc <- vapply(features, function(x) {
+    v <- x$properties$`eo:cloud_cover`
+    if (is.null(v) || !length(v)) NA_real_ else suppressWarnings(as.numeric(v[[1]]))
+  }, numeric(1))
+  acq <- vapply(features, acq_key, character(1))
+  pass <- is.na(cc) | cc < minclouds
+  acq %in% acq[pass]
+}
+
+# Internal: acquisitions that need no further tiles. Every acquisition with a known image is closed
+# (complete images, images deleted after classification, images rejected as cloudy), except those
+# whose only known images are still on disk and leave part of the AOI empty (fill proportion >=
+# fill_tol): their missing tiles are searched again, downloaded and mosaicked with them. Tiles that
+# were rejected because they do not reach the AOI (empty, no cloud value) do not close an
+# acquisition; they stay excluded tile by tile.
+# acq_of: function(files) -> acquisition keys in the form the STAC search builds from the items.
+closed_acquisitions <- function(image_dir, final_csv, rejected_csv, acq_of, fill_tol = 0.005) {
+  rd <- function(f) {
+    p <- file.path(image_dir, f)
+    if (file.exists(p)) readr::read_csv(p, show_col_types = FALSE, col_types = readr::cols(.default = "c")) else NULL
+  }
+  on_disk <- list.files(image_dir, pattern = "GMT.tif$")
+  fin <- rd(final_csv)
+  rej <- dplyr::bind_rows(lapply(rejected_csv, rd))
+  if (!is.null(rej) && nrow(rej) && all(c("fill_proportion", "cloud_proportion") %in% names(rej))) {
+    tile_only <- is.na(rej$cloud_proportion) & suppressWarnings(as.numeric(rej$fill_proportion)) >= 0.99
+    rej <- rej[!tile_only %in% TRUE, ]
+  }
+  files <- unique(c(on_disk, fin$file, if (!is.null(rej) && "file" %in% names(rej)) rej$file))
+  if (!length(files)) return(character(0))
+  fill <- if (!is.null(fin) && "fill_proportion" %in% names(fin)) {
+    suppressWarnings(as.numeric(fin$fill_proportion))[match(files, fin$file)]
+  } else rep(NA_real_, length(files))
+  open <- files %in% on_disk & !files %in% rej$file & !is.na(fill) & fill >= fill_tol
+  a <- acq_of(files)
+  unique(stats::na.omit(a[!open]))
+}
+
+# Internal: images of earlier runs that are mosaicked again with new tiles of the same acquisition.
+# Their old classifications are deleted, so that classify_*() classifies the completed image.
+drop_stale_classifications <- function(image_dir, files) {
+  if (!length(files)) return(invisible(NULL))
+  cdir <- file.path(dirname(image_dir), "classifications")
+  unlink(file.path(cdir, files))
+  invisible(NULL)
+}

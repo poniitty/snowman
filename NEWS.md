@@ -1,5 +1,20 @@
 # snowman (development version)
 
+## Full AOI coverage of images on tile borders
+
+* `extract_sentinel2()` and `extract_landsat()` judge the catalogue cloud cover (`minclouds`) per
+  acquisition (one satellite pass) instead of per tile: when one Sentinel-2 tile or Landsat WRS row of
+  an acquisition passes, the other tiles / rows needed to cover the AOI are downloaded too, even if
+  their own catalogue cloud cover is higher. Earlier, an AOI straddling two tiles could get an image
+  covering only part of it. The tiles of one pass show the same clouds over the AOI (the catalogue value
+  describes the whole 100 km tile), and the clear proportion of the AOI itself is still checked after
+  the mosaicking.
+* Re-runs complete such partial images of earlier runs: acquisitions whose image on disk leaves more
+  than 0.5% of the AOI empty stay open, their missing tiles / rows are downloaded and mosaicked with
+  the earlier image, and its old classification is deleted so that it is classified again. All other
+  known acquisitions are closed, so (for Sentinel-2) tiles skipped as not needed are no longer
+  downloaded again on a re-run.
+
 ## Calibrated class probabilities
 
 * A classifier model can carry a probability calibration (`model$calibration`: temperature scaling,

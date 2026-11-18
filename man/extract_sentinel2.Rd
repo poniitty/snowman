@@ -45,7 +45,10 @@ extract_sentinel2(
 \item{sats}{A character vector of satellites (default all, c("S2A", "S2B", "S2C"); Sentinel-2C replaced
 Sentinel-2A in routine operations in 2025).}
 
-\item{minclouds}{A numeric value representing the minimum cloud cover percentage (default is 50).}
+\item{minclouds}{Maximum catalogue cloud cover (\%) of a scene (default 50). It is judged per
+acquisition (one satellite pass): when one of the tiles of an acquisition passes, all its tiles
+needed to cover the AOI are downloaded, so that an AOI on a tile border is not left half empty. The
+cloudiness of the AOI itself is then checked from the downloaded image (\code{min_clear}).}
 
 \item{base_sentinel2_dir}{A character string representing the base directory for Sentinel-2 imagery.}
 
@@ -122,4 +125,7 @@ scenes listed in \code{imagery/s2s_final.csv} (also if their images have since b
 deleted, e.g. after classification) and scenes rejected earlier as too cloudy
 (\code{imagery/s2s_rejected.csv}). Only the newly downloaded images are checked and
 added to \code{s2s_final.csv}.
+Images of earlier runs that cover only part of the AOI (a tile or WRS row of their acquisition was
+not downloaded) are completed on a re-run: the missing parts are downloaded and mosaicked with
+them, and their old classifications are deleted so that they are classified again.
 }
